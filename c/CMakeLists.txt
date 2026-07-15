@@ -12,10 +12,12 @@ include(FetchContent)
 
 # Fetch cJSON (single .c/.h JSON parser).
 # Offline builds: pre-populate with -DFETCHCONTENT_SOURCE_DIR_CJSON=/path/to/cJSON
+# Pinned to the commit behind tag v1.7.18: tags are movable refs, so a
+# reviewed commit SHA is the only immutable identity for the vendored source.
 FetchContent_Declare(
     cjson
     GIT_REPOSITORY https://github.com/DaveGamble/cJSON.git
-    GIT_TAG v1.7.18
+    GIT_TAG acc76239bee01d8e9c858ae2cab296704e52d916 # v1.7.18
 )
 FetchContent_GetProperties(cjson)
 if(NOT cjson_POPULATED)

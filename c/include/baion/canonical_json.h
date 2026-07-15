@@ -4,7 +4,8 @@
 #include <cJSON.h>
 #include <stddef.h>
 
-/* Canonicalize any cJSON value. Returns heap-allocated string. Caller must free(). */
+/* Canonicalize any cJSON value. Returns heap-allocated string; caller must
+ * free(). Returns NULL on allocation failure — never a partial string. */
 char* baion_canonicalize_json(const cJSON* value);
 
 /* Pre-parse scan of raw JSON input bytes: returns BAION_OK if the input is
