@@ -76,6 +76,17 @@ int main(void)
         return -BAION_ERR_PARSE;
     }
 
+    /* Post-parse duplicate-key rejection (library-level walk): key sorting
+       would silently reorder duplicates and hash whichever the serializer
+       emits, collapsing distinct documents. Reviewer contract: reject with
+       exit 1, comparing DECODED key names (escaped and plain forms collide). */
+    if (baion_reject_duplicate_keys(root) != BAION_OK)
+    {
+        fprintf(stderr, "baion_canon_hash: duplicate object key in input is unsupported\n");
+        cJSON_Delete(root);
+        return 1;
+    }
+
     char* canonical = baion_canonicalize_json(root);
     cJSON_Delete(root);
 

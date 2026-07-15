@@ -26,6 +26,14 @@ func main() {
 		os.Exit(1)
 	}
 
+	// Duplicate-key detection needs the RAW bytes: decoding into
+	// map[string]interface{} keeps only one member per name and destroys the
+	// duplicate, so this contract check must run before the decode below.
+	if err := baionstd.CheckNoDuplicateKeys(input); err != nil {
+		fmt.Fprintf(os.Stderr, "baion_canon_hash: reject: duplicate object key in input (%v)\n", err)
+		os.Exit(1)
+	}
+
 	// json.Number preserves number spelling so canonicalization — not the
 	// decoder's float64 round-trip — decides the canonical numeric form.
 	dec := json.NewDecoder(bytes.NewReader(input))

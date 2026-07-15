@@ -21,11 +21,14 @@ The interesting engineering is in the edge cases: key ordering, number formattin
 
 Cross-lineage byte-identity is enforced and tested for:
 
-- objects, arrays, strings (full UTF-8, including multi-byte and escaped control characters **except U+0000**), booleans, null
+- objects (member names must be **unique** — see below), arrays, strings (full UTF-8, including multi-byte and escaped control characters **except U+0000**), booleans, null
 - integers within the IEEE-754 exact range (±2⁵³)
 - floats whose canonical form is pinned by the conformance vectors (including integer-valued floats, which serialize without a trailing `.0` per RFC 8785 §3.2.2.3 — `1.0` canonicalizes to `1` in every lineage, enforced by the verifier)
 
-**Uniformly rejected:** strings containing U+0000 (as the escape `\u0000` or a raw NUL byte) are refused with a nonzero exit by all seven CLIs. One lineage cannot represent embedded NUL losslessly, and accepting it anywhere would allow silent canonicalization collisions — so the domain excludes it outright, and the verifier asserts the rejection is uniform. A literal backslash followed by the text `u0000` (JSON `\\u0000`) is not a NUL and canonicalizes normally.
+**Uniformly rejected:** two input classes are refused with a nonzero exit by all seven CLIs, and the verifier asserts the rejection is uniform:
+
+- *Strings containing U+0000* (as the escape `\u0000` or a raw NUL byte). One lineage cannot represent embedded NUL losslessly, and accepting it anywhere would allow silent canonicalization collisions. A literal backslash followed by the text `u0000` (JSON `\\u0000`) is not a NUL and canonicalizes normally.
+- *Objects with duplicate member names*, at any nesting depth. RFC 8259 leaves duplicate-name behavior undefined, and the seven JSON ecosystems genuinely diverge (keep-first, keep-last, keep-both) — so object member names must be unique. Duplicates are detected on the *decoded* name: `{"a":1,"\u0061":2}` is rejected because `\u0061` decodes to `a`.
 
 **Known exclusions** (documented honestly because they are where seven ecosystems genuinely differ): number formatting outside the pinned vectors — very large integers beyond 2⁵³, negative zero, and scientific-notation thresholds — is not yet normalized across all seven lineages and must not be relied on. Non-finite numbers (NaN, ±Inf) are not valid JSON and are rejected or nulled per lineage test suites. If your data stays in the supported domain, the byte-identity guarantee holds; the conformance fixture is the authoritative definition of that domain.
 

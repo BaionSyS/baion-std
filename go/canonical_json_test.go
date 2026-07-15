@@ -174,6 +174,46 @@ func TestCanonicalJSON_EmbeddedNULRejection(t *testing.T) {
 	}
 }
 
+// Duplicate-key rejection contract: object member names must be unique at
+// every depth, compared on DECODED key names — so an escaped spelling
+// (`\u0061` decodes to "a") collides with a literal "a". The check runs on raw input
+// bytes because map decoding destroys duplicates before they can be seen.
+func TestCanonicalJSON_DuplicateKeyRejection(t *testing.T) {
+	rejects := []struct {
+		name  string
+		input string
+	}{
+		{"top_level", `{"a":1,"a":2}`},
+		{"nested_object", `{"x":{"b":1,"b":2}}`},
+		{"escaped_same_key", `{"a":1,"\u0061":2}`},
+		{"object_in_array", `[{"k":1,"k":2}]`},
+	}
+	for _, tt := range rejects {
+		t.Run("reject_"+tt.name, func(t *testing.T) {
+			if err := CheckNoDuplicateKeys([]byte(tt.input)); err != ErrDuplicateKey {
+				t.Errorf("input %q: want ErrDuplicateKey, got %v", tt.input, err)
+			}
+		})
+	}
+
+	accepts := []struct {
+		name  string
+		input string
+	}{
+		{"distinct_keys", `{"aa":1,"ab":2}`},
+		{"array_value_resets_position", `{"b":1,"a":[1,2]}`},
+		{"same_key_different_objects", `[{"k":1},{"k":2}]`},
+		{"nested_reuse_of_outer_key", `{"a":{"a":1}}`},
+	}
+	for _, tt := range accepts {
+		t.Run("accept_"+tt.name, func(t *testing.T) {
+			if err := CheckNoDuplicateKeys([]byte(tt.input)); err != nil {
+				t.Errorf("input %q: want nil, got %v", tt.input, err)
+			}
+		})
+	}
+}
+
 func TestCanonicalJSON_EmptyObject(t *testing.T) {
 	got := CanonicalizeJSON(map[string]interface{}{})
 	if got != "{}" {

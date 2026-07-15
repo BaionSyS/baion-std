@@ -8,6 +8,7 @@
 #include <algorithm>
 #include <cmath>
 #include <cstdio>
+#include <set>
 #include <vector>
 
 namespace baion::std_lib
@@ -144,6 +145,82 @@ bool contains_nul(const nlohmann::json& j)
         // null / boolean / number / binary — no strings to scan
         return false;
     }
+}
+
+// ── Duplicate object-key rejection scan ───────────────────────
+// CROSS-LINEAGE CONTRACT: all lineages reject inputs where any
+// object (at any depth) repeats a DECODED member name. nlohmann's
+// DOM parse keeps the last duplicate silently, so this scan runs
+// on the raw text through the SAX interface instead: key() fires
+// once per member with the already-unescaped name, and a per-object
+// set of seen keys (stack-managed across nesting) detects repeats.
+namespace
+{
+class duplicate_key_scanner final
+    : public nlohmann::json_sax<nlohmann::json>
+{
+public:
+    bool found_duplicate = false;
+
+    bool key(string_t& val) override
+    {
+        // Comparing decoded names: at this point nlohmann has already
+        // resolved \uXXXX escapes, so "a" and "a" collide here.
+        if (!seen_.back().insert(val).second)
+        {
+            found_duplicate = true;
+            return false; // abort the parse — one duplicate is enough
+        }
+        return true;
+    }
+
+    bool start_object(std::size_t) override
+    {
+        seen_.emplace_back();
+        return true;
+    }
+
+    bool end_object() override
+    {
+        seen_.pop_back();
+        return true;
+    }
+
+    // Remaining events carry no key information — accept and continue.
+    bool null() override { return true; }
+    bool boolean(bool) override { return true; }
+    bool number_integer(number_integer_t) override { return true; }
+    bool number_unsigned(number_unsigned_t) override { return true; }
+    bool number_float(number_float_t, const string_t&) override
+    {
+        return true;
+    }
+    bool string(string_t&) override { return true; }
+    bool binary(binary_t&) override { return true; }
+    bool start_array(std::size_t) override { return true; }
+    bool end_array() override { return true; }
+
+    bool parse_error(std::size_t, const std::string&,
+                     const nlohmann::detail::exception&) override
+    {
+        // Malformed input is the DOM parse's error to report, not
+        // ours — stop scanning without flagging a duplicate.
+        return false;
+    }
+
+private:
+    std::vector<std::set<std::string>> seen_;
+};
+} // namespace
+
+bool has_duplicate_keys(const std::string& raw_input)
+{
+    duplicate_key_scanner scanner;
+    // Return value ignored deliberately: sax_parse also returns false
+    // on plain syntax errors, and only found_duplicate answers the
+    // question this scan asks.
+    nlohmann::json::sax_parse(raw_input, &scanner);
+    return scanner.found_duplicate;
 }
 
 // ── Checked canonicalization (library error path) ─────────────

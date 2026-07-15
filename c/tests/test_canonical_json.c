@@ -139,6 +139,41 @@ static void test_u0000_rejection(void)
     ASSERT_INT_EQ(baion_reject_u0000(clean, strlen(clean)), BAION_OK);
 }
 
+/* Parse text with cJSON, run the duplicate-key walk on the decoded tree,
+ * free the tree. Returns the walk's verdict; -1 flags a parse failure so the
+ * assert lines below surface it instead of a misleading OK/ERR. */
+static int dup_check(const char* text)
+{
+    cJSON* root = cJSON_Parse(text);
+    if (!root)
+        return -1;
+    int rc = baion_reject_duplicate_keys(root);
+    cJSON_Delete(root);
+    return rc;
+}
+
+static void test_duplicate_key_rejection(void)
+{
+    /* Plain duplicate at top level: reject */
+    ASSERT_INT_EQ(dup_check("{\"a\":1,\"a\":2}"), BAION_ERR_PARSE);
+
+    /* Duplicate nested one object deep: reject */
+    ASSERT_INT_EQ(dup_check("{\"x\":{\"b\":1,\"b\":2}}"), BAION_ERR_PARSE);
+
+    /* Escaped-form duplicate: backslash-u0061 decodes to "a", so the DECODED
+     * names collide even though the raw spellings differ: reject */
+    ASSERT_INT_EQ(dup_check("{\"a\":1,\"\\u0061\":2}"), BAION_ERR_PARSE);
+
+    /* Duplicate inside an object inside an array: reject */
+    ASSERT_INT_EQ(dup_check("[{\"c\":1,\"c\":2}]"), BAION_ERR_PARSE);
+
+    /* Distinct keys sharing a prefix: allowed */
+    ASSERT_INT_EQ(dup_check("{\"aa\":1,\"ab\":2}"), BAION_OK);
+
+    /* Distinct keys with an array value: allowed */
+    ASSERT_INT_EQ(dup_check("{\"b\":1,\"a\":[1,2]}"), BAION_OK);
+}
+
 int main(void)
 {
     printf("test_canonical_json:\n");
@@ -149,6 +184,7 @@ int main(void)
     RUN_TEST(test_empty_payload);
     RUN_TEST(test_booleans);
     RUN_TEST(test_u0000_rejection);
+    RUN_TEST(test_duplicate_key_rejection);
     TEST_SUMMARY();
     return _test_failed;
 }

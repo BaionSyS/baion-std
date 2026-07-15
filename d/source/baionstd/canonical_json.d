@@ -167,6 +167,222 @@ void canonicalizeValue(ref Appender!string buf, const JSONValue v)
     }
 }
 
+// ── Duplicate object-key rejection scan ───────────────────────
+//
+// CROSS-LINEAGE CONTRACT: a JSON object with duplicate member names
+// (compared on DECODED key text, any depth) is rejected — all 7
+// lineages error so the CLI exits 1 mentioning duplicate keys.
+// `{"a":1,"\u0061":2}` IS a duplicate: \u0061 decodes to "a".
+//
+// WHY a raw-input scan and not a post-parse walk: std.json's
+// parseJSON stores objects in an associative array and silently
+// keeps the LAST duplicate — by the time a JSONValue exists the
+// evidence is gone. This scanner tokenizes the raw text instead,
+// decoding string escapes so key comparison matches the parser's
+// view, and tracking a per-object seen-key set on a nesting stack.
+//
+// Precondition: the input has already been accepted by parseJSON,
+// so this scan may assume well-formed JSON (matched braces, valid
+// escapes) and never needs to re-report syntax errors.
+
+/// Scan raw JSON text for duplicate member names within any single
+/// object. Returns true if a duplicate (decoded comparison) exists.
+bool hasDuplicateKeys(const(char)[] raw)
+{
+    static struct Frame
+    {
+        bool isObject;
+        bool[string] seen;
+    }
+
+    Frame[] stack;
+    // True exactly when the next string token is an object member name
+    // (right after '{' or after ',' inside an object).
+    bool expectKey = false;
+
+    size_t i = 0;
+    while (i < raw.length)
+    {
+        switch (raw[i])
+        {
+        case '{':
+            stack ~= Frame(true, null);
+            expectKey = true;
+            i++;
+            break;
+        case '[':
+            stack ~= Frame(false, null);
+            expectKey = false;
+            i++;
+            break;
+        case '}':
+        case ']':
+            if (stack.length)
+                stack.length -= 1;
+            expectKey = false;
+            i++;
+            break;
+        case ',':
+            expectKey = stack.length && stack[$ - 1].isObject;
+            i++;
+            break;
+        case ':':
+            expectKey = false;
+            i++;
+            break;
+        case '"':
+            // Structural ':' ',' '}' inside string literals never reach the
+            // cases above: decodeJSONString consumes the whole literal here.
+            string decoded = decodeJSONString(raw, i);
+            if (expectKey && stack.length && stack[$ - 1].isObject)
+            {
+                if (decoded in stack[$ - 1].seen)
+                    return true;
+                stack[$ - 1].seen[decoded] = true;
+                expectKey = false;
+            }
+            break;
+        default:
+            // Numbers, literals, whitespace — structurally irrelevant here.
+            i++;
+            break;
+        }
+    }
+    return false;
+}
+
+/// Decode one JSON string literal starting at the opening quote.
+/// Advances `i` past the closing quote; returns the decoded text.
+/// WHY decode at all: key comparison must match the parser's view,
+/// so the keys `"a"` and `"\u0061"` compare equal.
+private string decodeJSONString(const(char)[] raw, ref size_t i)
+{
+    auto buf = appender!string;
+    i++; // opening quote
+    while (i < raw.length)
+    {
+        char c = raw[i];
+        if (c == '"')
+        {
+            i++; // closing quote
+            break;
+        }
+        if (c != '\\')
+        {
+            buf.put(c);
+            i++;
+            continue;
+        }
+        i++; // backslash
+        if (i >= raw.length)
+            break; // unreachable for parseJSON-accepted input
+        char e = raw[i];
+        i++;
+        switch (e)
+        {
+        case '"':
+            buf.put('"');
+            break;
+        case '\\':
+            buf.put('\\');
+            break;
+        case '/':
+            buf.put('/');
+            break;
+        case 'b':
+            buf.put('\b');
+            break;
+        case 'f':
+            buf.put('\f');
+            break;
+        case 'n':
+            buf.put('\n');
+            break;
+        case 'r':
+            buf.put('\r');
+            break;
+        case 't':
+            buf.put('\t');
+            break;
+        case 'u':
+            uint cp = readHex4(raw, i);
+            // Surrogate pair: combine high + low into one codepoint,
+            // matching how the parser decodes the same escape sequence.
+            if (cp >= 0xD800 && cp <= 0xDBFF && i + 5 < raw.length
+                    && raw[i] == '\\' && raw[i + 1] == 'u')
+            {
+                size_t save = i;
+                i += 2;
+                uint lo = readHex4(raw, i);
+                if (lo >= 0xDC00 && lo <= 0xDFFF)
+                    cp = 0x10000 + ((cp - 0xD800) << 10) + (lo - 0xDC00);
+                else
+                    i = save; // lone high surrogate — leave as-is (defensive)
+            }
+            putCodepoint(buf, cp);
+            break;
+        default:
+            buf.put(e); // unreachable for parseJSON-accepted input
+            break;
+        }
+    }
+    return buf[];
+}
+
+/// Read exactly 4 hex digits at `i`, advancing past them.
+private uint readHex4(const(char)[] raw, ref size_t i)
+{
+    uint v = 0;
+    foreach (_; 0 .. 4)
+    {
+        if (i >= raw.length)
+            return v; // unreachable for parseJSON-accepted input
+        char h = raw[i];
+        uint d;
+        if (h >= '0' && h <= '9')
+            d = h - '0';
+        else if (h >= 'a' && h <= 'f')
+            d = h - 'a' + 10;
+        else if (h >= 'A' && h <= 'F')
+            d = h - 'A' + 10;
+        else
+            return v;
+        v = (v << 4) | d;
+        i++;
+    }
+    return v;
+}
+
+/// UTF-8-encode one codepoint into the buffer.
+/// WHY manual and not std.utf.encode: std.utf throws on lone
+/// surrogates; the scan only needs a deterministic byte form for
+/// EQUALITY comparison, never for output, so encode unconditionally.
+private void putCodepoint(ref Appender!string buf, uint cp)
+{
+    if (cp < 0x80)
+    {
+        buf.put(cast(char) cp);
+    }
+    else if (cp < 0x800)
+    {
+        buf.put(cast(char)(0xC0 | (cp >> 6)));
+        buf.put(cast(char)(0x80 | (cp & 0x3F)));
+    }
+    else if (cp < 0x10000)
+    {
+        buf.put(cast(char)(0xE0 | (cp >> 12)));
+        buf.put(cast(char)(0x80 | ((cp >> 6) & 0x3F)));
+        buf.put(cast(char)(0x80 | (cp & 0x3F)));
+    }
+    else
+    {
+        buf.put(cast(char)(0xF0 | (cp >> 18)));
+        buf.put(cast(char)(0x80 | ((cp >> 12) & 0x3F)));
+        buf.put(cast(char)(0x80 | ((cp >> 6) & 0x3F)));
+        buf.put(cast(char)(0x80 | (cp & 0x3F)));
+    }
+}
+
 /// Write a JSON-quoted string with minimal escaping (RFC 8785 §3.2.2.2).
 /// Only escapes characters that JSON requires: " \ and control chars 0x01-0x1F.
 /// Forward slash / is NOT escaped.

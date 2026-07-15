@@ -5,9 +5,11 @@
 // no whitespace, minimal escaping, integer-valued floats stripped of ".0"),
 // then prints the lowercase-hex SHA-256 of the canonical bytes + newline.
 // Exit 0 on success; exit 1 on parse error or on rejected input — any
-// object key or string value containing U+0000 (message to stderr).
+// object key or string value containing U+0000, or any object with
+// duplicate member names at any depth (message to stderr).
 
 use baion_std::canonical_json::canonicalize_json;
+use baion_std::dup_check::check_duplicate_keys;
 use baion_std::hash::sha256_hex;
 use std::io::Read;
 use std::process::ExitCode;
@@ -28,6 +30,15 @@ fn main() -> ExitCode {
             return ExitCode::from(1);
         }
     };
+
+    // CROSS-LINEAGE CONTRACT (external review, 2026-07): duplicate object
+    // member names at any depth are rejected. This runs on the RAW input
+    // text — the Value above has already collapsed duplicates (serde_json
+    // keeps the last), so only a streaming pass can still see them.
+    if let Err(e) = check_duplicate_keys(&input) {
+        eprintln!("baion_canon_hash: {}", e);
+        return ExitCode::from(1);
+    }
 
     // CROSS-LINEAGE CONTRACT (external review, 2026-07): U+0000 anywhere in
     // an object key or string value is rejected — the library walk decides,

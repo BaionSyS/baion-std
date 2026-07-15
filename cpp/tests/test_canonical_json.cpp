@@ -148,6 +148,45 @@ TEST(CanonicalJSON, AllowsLiteralBackslashU0000Text)
     EXPECT_EQ(out, "{\"x\":\"a\\\\u0000b\"}");
 }
 
+// ── Duplicate-key rejection: repeat in a flat object ──────────
+// The DOM parse silently keeps the last duplicate, so this scan
+// runs on the raw text — the duplicate must still be caught.
+TEST(CanonicalJSON, RejectsDuplicateKeyFlat)
+{
+    EXPECT_TRUE(has_duplicate_keys("{\"a\":1,\"a\":2}"));
+}
+
+// ── Duplicate-key rejection: repeat inside a nested object ────
+TEST(CanonicalJSON, RejectsDuplicateKeyNested)
+{
+    EXPECT_TRUE(has_duplicate_keys("{\"x\":{\"b\":1,\"b\":2}}"));
+}
+
+// ── Duplicate-key rejection: escaped vs. literal key ──────────
+// The six-character escape backslash-u0061 decodes to "a", so it collides
+// with the literal key "a" — decoded names are what the contract
+// compares, not source spellings.
+TEST(CanonicalJSON, RejectsDuplicateKeyEscaped)
+{
+    EXPECT_TRUE(has_duplicate_keys("{\"a\":1,\"\\u0061\":2}"));
+}
+
+// ── Duplicate-key rejection: object inside an array ───────────
+TEST(CanonicalJSON, RejectsDuplicateKeyInArrayElement)
+{
+    EXPECT_TRUE(has_duplicate_keys("[{\"k\":1,\"k\":2}]"));
+}
+
+// ── Distinct keys pass the duplicate scan ─────────────────────
+// Shared prefixes and sibling objects reusing a key at different
+// depths are NOT duplicates — only repeats within one object are.
+TEST(CanonicalJSON, AllowsDistinctKeys)
+{
+    EXPECT_FALSE(has_duplicate_keys("{\"aa\":1,\"ab\":2}"));
+    EXPECT_FALSE(has_duplicate_keys("{\"b\":1,\"a\":[1,2]}"));
+    EXPECT_FALSE(has_duplicate_keys("{\"a\":{\"a\":1},\"b\":{\"a\":2}}"));
+}
+
 // ── Checked path matches unchecked path on clean input ────────
 TEST(CanonicalJSON, CheckedMatchesUncheckedOnCleanInput)
 {

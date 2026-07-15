@@ -28,6 +28,33 @@ let rec reject_nul (v : Yojson.Safe.t) =
           reject_nul item)
         pairs
 
+(** Raised when an object carries the same member name twice (any depth). *)
+exception Duplicate_key of string
+
+(* CROSS-LINEAGE CONTRACT: objects with duplicate member names (at any
+   depth) must be rejected by all seven lineage libraries. yojson's
+   Assoc is a plain pair list that preserves EVERY member — including
+   repeats — and decodes backslash-u escapes into the key string before
+   we see it, so a plain String.compare on parsed keys catches both the
+   literal and the escaped spelling of the same name. We sort a copy of
+   the key list and scan adjacent entries rather than trusting the
+   parser (which never refuses duplicates). *)
+let rec reject_duplicate_keys (v : Yojson.Safe.t) =
+  match v with
+  | `Null | `Bool _ | `Int _ | `Intlit _ | `Float _ | `String _ -> ()
+  | `List items -> List.iter reject_duplicate_keys items
+  | `Assoc pairs ->
+      let keys = List.sort String.compare (List.map fst pairs) in
+      let rec scan = function
+        | a :: (b :: _ as rest) ->
+            if String.equal a b then
+              raise (Duplicate_key ("duplicate object key: " ^ a));
+            scan rest
+        | _ -> ()
+      in
+      scan keys;
+      List.iter (fun (_, item) -> reject_duplicate_keys item) pairs
+
 (* Write a JSON-quoted string with minimal escaping (RFC 8785 §3.2.2.2).
    Only escapes: quotes, backslash, and control chars 0x00-0x1F.
    Forward slash is NOT escaped. *)
@@ -92,9 +119,11 @@ let rec canonicalize_value buf (v : Yojson.Safe.t) =
 
 (** Canonicalize any JSON value to a canonical string. Keys sorted
     lexicographically at every nesting level, no whitespace.
-    @raise Nul_rejected if any string (key or value) contains U+0000. *)
+    @raise Nul_rejected if any string (key or value) contains U+0000.
+    @raise Duplicate_key if any object repeats a member name. *)
 let canonicalize_json (v : Yojson.Safe.t) : string =
   reject_nul v;
+  reject_duplicate_keys v;
   let buf = Buffer.create 256 in
   canonicalize_value buf v;
   Buffer.contents buf

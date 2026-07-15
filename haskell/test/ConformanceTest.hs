@@ -78,7 +78,19 @@ conformanceTests =
       testCase "Test 5: integer-valued floats" testIntegerValuedFloats,
       testCase "Test 6: U+0000 in string value rejected" testNulValueRejected,
       testCase "Test 7: U+0000 in object key rejected" testNulKeyRejected,
-      testCase "Test 8: literal backslash-u0000 text allowed" testEscapedNulTextAllowed
+      testCase "Test 8: literal backslash-u0000 text allowed" testEscapedNulTextAllowed,
+      testCase "Test 9: duplicate key at top level rejected" $
+        assertDuplicateRejected "{\"a\":1,\"a\":2}",
+      testCase "Test 10: duplicate key in nested object rejected" $
+        assertDuplicateRejected "{\"x\":{\"b\":1,\"b\":2}}",
+      testCase "Test 11: escape-spelled duplicate key rejected" $
+        assertDuplicateRejected "{\"a\":1,\"\\u0061\":2}",
+      testCase "Test 12: duplicate key in object-in-array rejected" $
+        assertDuplicateRejected "[{\"k\":1,\"k\":2}]",
+      testCase "Test 13: distinct keys sharing a prefix accepted" $
+        assertNoDuplicate "{\"aa\":1,\"ab\":2}",
+      testCase "Test 14: repeated array values are not duplicate keys" $
+        assertNoDuplicate "{\"b\":1,\"a\":[1,2]}"
     ]
 
 testSha256Vector :: Assertion
@@ -128,6 +140,30 @@ testNulKeyRejected =
   case A.eitherDecodeStrict' (BSC.pack "{\"a\\u0000\":1}") of
     Left err -> assertFailure ("fixture must parse: " ++ err)
     Right v -> isRejectedForNul (canonicalizeJsonChecked v)
+
+-- Duplicate-key contract (CROSS-LINEAGE): objects with duplicate
+-- member names — any depth, compared by DECODED key text so the
+-- escape spelling backslash-u0061 collides with "a" — are rejected.
+-- The check runs on the
+-- RAW bytes because aeson's KeyMap has already dropped the duplicate
+-- by the time a Value exists.
+assertDuplicateRejected :: String -> Assertion
+assertDuplicateRejected raw =
+  case checkNoDuplicateKeys (BSC.pack raw) of
+    Left err ->
+      assertBool
+        ("error message must mention duplicate key, got: " ++ err)
+        ( T.isInfixOf "duplicate" (T.pack err)
+            && T.isInfixOf "key" (T.pack err)
+        )
+    Right () ->
+      assertFailure ("expected duplicate-key rejection for: " ++ raw)
+
+assertNoDuplicate :: String -> Assertion
+assertNoDuplicate raw =
+  case checkNoDuplicateKeys (BSC.pack raw) of
+    Left err -> assertFailure ("expected acceptance, got: " ++ err)
+    Right () -> return ()
 
 -- Literal backslash + "u0000" text (JSON source "a\\\\u0000b") decodes
 -- to a backslash character, not a NUL — it must pass unchanged.

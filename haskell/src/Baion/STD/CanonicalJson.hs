@@ -7,16 +7,25 @@
 module Baion.STD.CanonicalJson
   ( canonicalizeJson,
     canonicalizeJsonChecked,
+    checkNoDuplicateKeys,
     writeJsonString,
   )
 where
 
 import qualified Data.Aeson as A
+import Data.Aeson.Decoding.ByteString (bsToTokens)
+import Data.Aeson.Decoding.Tokens
+  ( TkArray (..),
+    TkRecord (..),
+    Tokens (..),
+  )
 import qualified Data.Aeson.Key as AK
 import qualified Data.Aeson.KeyMap as AKM
+import qualified Data.ByteString as BS
 import Data.Char (ord)
 import qualified Data.Map.Strict as Map
 import qualified Data.Scientific as S
+import qualified Data.Set as Set
 import qualified Data.Text as T
 import qualified Data.Vector as V
 import Text.Printf (printf)
@@ -35,6 +44,53 @@ canonicalizeJsonChecked v
   | containsNul v =
       Left "input contains U+0000 (NUL) in a string; rejected by canonical-JSON contract"
   | otherwise = Right (canonicalizeValue v)
+
+-- | Reject any JSON object (at any depth) carrying duplicate member
+-- names. This must scan the RAW input: aeson's KeyMap silently drops
+-- duplicates at parse time, so the information is gone from 'A.Value'.
+-- The aeson >= 2.2 token stream ('bsToTokens') surfaces every 'TkPair'
+-- with its DECODED key ('AK.Key'), so escape-spelled duplicates like
+-- {"a":1,"a":2} compare equal, as the contract requires.
+-- Lexer errors ('TkErr' family) are deliberately NOT reported here —
+-- the CLI decodes with aeson first, so a malformed input never reaches
+-- this scan with an error message the decoder wouldn't own.
+-- CROSS-LINEAGE CONTRACT: all 7 lineages reject duplicate keys
+-- identically (Haskell previously kept-FIRST, the odd one of three
+-- divergent behaviors).
+checkNoDuplicateKeys :: BS.ByteString -> Either String ()
+checkNoDuplicateKeys bs = case scanTokens (bsToTokens bs) of
+  Left key ->
+    Left
+      ( "duplicate object key "
+          ++ show (AK.toText key)
+          ++ "; rejected by canonical-JSON contract"
+      )
+  Right _ -> Right ()
+  where
+    -- Left key = duplicate found (short-circuit); Right (Just k) =
+    -- value consumed cleanly, continue with k; Right Nothing = lexer
+    -- error, stop scanning (the decoder owns malformed-input errors).
+    scanTokens :: Tokens k e -> Either AK.Key (Maybe k)
+    scanTokens (TkLit _ k) = Right (Just k)
+    scanTokens (TkText _ k) = Right (Just k)
+    scanTokens (TkNumber _ k) = Right (Just k)
+    scanTokens (TkArrayOpen a) = scanArray a
+    scanTokens (TkRecordOpen r) = scanRecord Set.empty r
+    scanTokens (TkErr _) = Right Nothing
+
+    scanArray :: TkArray k e -> Either AK.Key (Maybe k)
+    scanArray (TkItem t) = scanTokens t >>= maybe (Right Nothing) scanArray
+    scanArray (TkArrayEnd k) = Right (Just k)
+    scanArray (TkArrayErr _) = Right Nothing
+
+    scanRecord :: Set.Set AK.Key -> TkRecord k e -> Either AK.Key (Maybe k)
+    scanRecord seen (TkPair key t)
+      | key `Set.member` seen = Left key
+      | otherwise =
+          scanTokens t
+            >>= maybe (Right Nothing) (scanRecord (Set.insert key seen))
+    scanRecord _ (TkRecordEnd k) = Right (Just k)
+    scanRecord _ (TkRecordErr _) = Right Nothing
 
 -- | Recursive walk: does any string (key or value) contain U+0000?
 containsNul :: A.Value -> Bool

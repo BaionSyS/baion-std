@@ -144,3 +144,41 @@ unittest
     assert(canonicalizeJSON(literalBackslash) == `{"x":"a\\u0000b"}`,
             "U+0000 rejection FAILED: literal backslash + u0000 text wrongly rejected");
 }
+
+// ── Duplicate object-key rejection (contract change) ──
+// Objects with duplicate member names (compared on DECODED key text,
+// any depth) must be rejected. The scan runs on the RAW input because
+// parseJSON's associative array silently keeps the last duplicate.
+// WYSIWYG backtick strings below keep escape sequences like \u0061
+// as literal JSON text, exactly as the CLI receives them on stdin.
+unittest
+{
+    // Flat duplicate
+    assert(hasDuplicateKeys(`{"a":1,"a":2}`),
+            "duplicate-key FAILED: flat duplicate not detected");
+
+    // Nested object duplicate
+    assert(hasDuplicateKeys(`{"x":{"b":1,"b":2}}`),
+            "duplicate-key FAILED: nested duplicate not detected");
+
+    // Escaped duplicate: \u0061 decodes to "a" — keys compare DECODED
+    assert(hasDuplicateKeys(`{"a":1,"\u0061":2}`),
+            "duplicate-key FAILED: escaped duplicate (decoded comparison) not detected");
+
+    // Object inside an array
+    assert(hasDuplicateKeys(`[{"k":1,"k":2}]`),
+            "duplicate-key FAILED: object-in-array duplicate not detected");
+
+    // Distinct keys — accepted
+    assert(!hasDuplicateKeys(`{"aa":1,"ab":2}`),
+            "duplicate-key FAILED: distinct keys wrongly flagged");
+
+    // Sibling objects/arrays each get their own seen-set; the string
+    // value "a" and array contents must not be mistaken for keys
+    assert(!hasDuplicateKeys(`{"b":1,"a":[1,2]}`),
+            "duplicate-key FAILED: array value wrongly flagged");
+    assert(!hasDuplicateKeys(`[{"k":1},{"k":2}]`),
+            "duplicate-key FAILED: same key in sibling objects wrongly flagged");
+    assert(!hasDuplicateKeys(`{"k":"k","v":"k"}`),
+            "duplicate-key FAILED: string VALUE matching a key wrongly flagged");
+}

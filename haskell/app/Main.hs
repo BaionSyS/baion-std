@@ -6,7 +6,7 @@
 -- to stderr with a nonzero exit so pipelines fail loudly.
 module Main (main) where
 
-import Baion.STD.CanonicalJson (canonicalizeJsonChecked)
+import Baion.STD.CanonicalJson (canonicalizeJsonChecked, checkNoDuplicateKeys)
 import Baion.STD.Hash (sha256HexBytes)
 import qualified Data.Aeson as A
 import qualified Data.ByteString as BS
@@ -23,10 +23,12 @@ main = do
       hPutStrLn stderr ("baion-canon-hash: parse error: " ++ err)
       exitFailure
     Right v ->
-      -- Checked canonicalization: the library rejects any string
-      -- containing U+0000 (aeson preserves NUL in Text, so the CLI
-      -- would otherwise pass it through to the digest).
-      case canonicalizeJsonChecked v of
+      -- Duplicate-key check runs on the RAW bytes (aeson's KeyMap
+      -- drops duplicates at parse, so the decoded Value can't tell);
+      -- then checked canonicalization rejects any string containing
+      -- U+0000 (aeson preserves NUL in Text, so the CLI would
+      -- otherwise pass it through to the digest).
+      case checkNoDuplicateKeys input >> canonicalizeJsonChecked v of
         Left err -> do
           hPutStrLn stderr ("baion-canon-hash: " ++ err)
           exitFailure

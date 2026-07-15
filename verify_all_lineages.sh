@@ -23,12 +23,19 @@ inputs=(
   '{"x":"a\\u0000b"}'
 )
 
-# Inputs every lineage must UNIFORMLY REJECT (nonzero exit): U+0000 is outside
-# the supported domain because one lineage cannot represent it losslessly —
+# Inputs every lineage must UNIFORMLY REJECT (nonzero exit).
+# U+0000: outside the supported domain because one lineage cannot represent it losslessly —
 # accepting it anywhere would allow silent canonicalization collisions.
+# Duplicate object keys: RFC 8259 leaves duplicate-name behavior undefined and the seven
+# ecosystems genuinely diverge (keep-first / keep-last / keep-both), so member names must
+# be unique; duplicates compare on the DECODED name (third duplicate vector spells the
+# same key as an escape).
 reject_inputs=(
   '{"x":"a\u0000b"}'
   '{"a\u0000":1}'
+  '{"a":1,"a":2}'
+  '{"x":{"b":1,"b":2}}'
+  '{"a":1,"\u0061":2}'
 )
 
 fail=0

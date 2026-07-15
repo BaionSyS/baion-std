@@ -32,6 +32,19 @@ std::string canonicalize_json(const nlohmann::json& j);
 // after parsing is an ordinary string and passes.
 bool contains_nul(const nlohmann::json& j);
 
+// ── Duplicate object-key rejection scan ───────────────────────
+// CROSS-LINEAGE CONTRACT: any input containing an object with two
+// members whose DECODED key names are equal (at any depth) must be
+// rejected before canonicalization. Returns true if a duplicate
+// key is present anywhere.
+// Note: this operates on the RAW input text via nlohmann's SAX
+// interface, because the default DOM parse silently deduplicates
+// (keeps last) — post-parse detection is impossible. The SAX key()
+// callback receives each key already unescaped, so the six-character
+// escape backslash-u0061 and the literal "a" compare equal, matching
+// the decoded-name semantics of the contract.
+bool has_duplicate_keys(const std::string& raw_input);
+
 // ── Checked canonicalization (library error path) ─────────────
 // Rejection-aware entry point: scans for U+0000 first, then
 // canonicalizes into `out`. Returns false (leaving `out` empty)

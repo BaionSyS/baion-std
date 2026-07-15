@@ -266,6 +266,41 @@ int baion_reject_u0000(const char* input, size_t len)
     return BAION_OK;
 }
 
+int baion_reject_duplicate_keys(const cJSON* root)
+{
+    if (!root)
+        return BAION_OK;
+
+    if (cJSON_IsObject(root))
+    {
+        /* Byte-wise comparison of DECODED sibling key names: cJSON preserves
+         * duplicate children and has already decoded escapes into
+         * child->string, so backslash-u0061 and "a" collide here even though their
+         * raw-text spellings differ. */
+        for (const cJSON* a = root->child; a; a = a->next)
+        {
+            for (const cJSON* b = a->next; b; b = b->next)
+            {
+                if (a->string && b->string && strcmp(a->string, b->string) == 0)
+                    return BAION_ERR_PARSE;
+            }
+        }
+    }
+
+    /* Objects and arrays both chain values through ->child; recurse into
+     * either so duplicates inside array elements are caught too. */
+    if (cJSON_IsObject(root) || cJSON_IsArray(root))
+    {
+        for (const cJSON* child = root->child; child; child = child->next)
+        {
+            if (baion_reject_duplicate_keys(child) != BAION_OK)
+                return BAION_ERR_PARSE;
+        }
+    }
+
+    return BAION_OK;
+}
+
 char* baion_canonicalize_json(const cJSON* value)
 {
     strbuf_t sb;

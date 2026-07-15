@@ -8,9 +8,11 @@
 package baionstd
 
 import (
+	"bytes"
 	"encoding/json"
 	"errors"
 	"fmt"
+	"io"
 	"math"
 	"sort"
 	"strconv"
@@ -24,6 +26,88 @@ import (
 // implementations cannot round-trip NUL through NUL-terminated strings, so
 // accepting it here would let Go produce hashes no sibling can reproduce.
 var ErrEmbeddedNUL = errors.New("embedded U+0000 in string")
+
+// ErrDuplicateKey rejects inputs containing an object with duplicate member
+// names at any nesting depth.
+//
+// CROSS-LINEAGE CONTRACT: every language implementation uniformly REJECTS
+// documents with duplicate object keys — decoders disagree on which member
+// wins (first vs. last), so accepting them would let two lineages decode
+// different values from the same bytes and silently break hash parity.
+var ErrDuplicateKey = errors.New("duplicate object key")
+
+// CheckNoDuplicateKeys scans raw JSON input for duplicate object member names
+// at any depth and returns ErrDuplicateKey if one is found.
+//
+// This check MUST run on the raw input bytes, not the decoded value: decoding
+// into map[string]interface{} silently keeps one member and destroys the
+// evidence, so CanonicalizeJSONChecked (which sees only the decoded tree)
+// cannot detect duplicates. Callers that decode raw JSON for hashing MUST run
+// this before (or alongside) decoding.
+//
+// Comparison is on DECODED key names — json.Decoder.Token returns each object
+// key with escapes resolved, so `"\u0061"` and `"a"` are the same key and a
+// document containing both is rejected.
+func CheckNoDuplicateKeys(data []byte) error {
+	dec := json.NewDecoder(bytes.NewReader(data))
+	// UseNumber avoids float64 conversion errors on huge number tokens; this
+	// pass only cares about object keys, never numeric values.
+	dec.UseNumber()
+
+	// One frame per open container. Inside an object, tokens alternate
+	// key, value, key, value…; atKey tracks which position the next token
+	// (or opening delimiter) fills.
+	type frame struct {
+		isObject bool
+		atKey    bool
+		seen     map[string]struct{}
+	}
+	var stack []*frame
+
+	// completeValue flips the enclosing object frame back to key position
+	// after a full value (scalar or closed container) has been consumed.
+	completeValue := func() {
+		if len(stack) > 0 && stack[len(stack)-1].isObject {
+			stack[len(stack)-1].atKey = true
+		}
+	}
+
+	for {
+		tok, err := dec.Token()
+		if err == io.EOF {
+			return nil
+		}
+		if err != nil {
+			// Malformed JSON is not this check's verdict — the caller's
+			// decode pass reports syntax errors with proper diagnostics.
+			return nil
+		}
+		if d, ok := tok.(json.Delim); ok {
+			switch d {
+			case '{':
+				stack = append(stack, &frame{isObject: true, atKey: true, seen: make(map[string]struct{})})
+			case '[':
+				stack = append(stack, &frame{})
+			case '}', ']':
+				stack = stack[:len(stack)-1]
+				completeValue()
+			}
+			continue
+		}
+		if len(stack) > 0 && stack[len(stack)-1].isObject && stack[len(stack)-1].atKey {
+			// Token() guarantees object keys are strings with escapes decoded.
+			key := tok.(string)
+			top := stack[len(stack)-1]
+			if _, dup := top.seen[key]; dup {
+				return ErrDuplicateKey
+			}
+			top.seen[key] = struct{}{}
+			top.atKey = false
+			continue
+		}
+		completeValue()
+	}
+}
 
 // CanonicalizeJSON converts any JSON-compatible value to canonical JSON string.
 func CanonicalizeJSON(v interface{}) string {

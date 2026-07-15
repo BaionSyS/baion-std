@@ -119,6 +119,51 @@ let test_backslash_u0000_text_allowed () =
     {|{"x":"a\\u0000b"}|}
     (Canonical_json.canonicalize_json v)
 
+(* Duplicate object keys: yojson's Assoc keeps every member (including
+   repeats), so the reject walk sees both entries and must refuse them
+   before canonicalization — at top level, nested, or inside arrays. *)
+let test_duplicate_key_top_level () =
+  let v = Yojson.Safe.from_string {|{"a":1,"a":2}|} in
+  Alcotest.check_raises "duplicate key at top level rejected"
+    (Canonical_json.Duplicate_key "duplicate object key: a")
+    (fun () -> ignore (Canonical_json.canonicalize_json v))
+
+let test_duplicate_key_nested () =
+  let v = Yojson.Safe.from_string {|{"x":{"b":1,"b":2}}|} in
+  Alcotest.check_raises "duplicate key in nested object rejected"
+    (Canonical_json.Duplicate_key "duplicate object key: b")
+    (fun () -> ignore (Canonical_json.canonicalize_json v))
+
+(* yojson decodes the backslash-u0061 escape to "a" while parsing, so the
+   two keys below are the SAME decoded name and must collide — this is
+   the "compare decoded key names" clause of the contract. *)
+let test_duplicate_key_escaped () =
+  let v = Yojson.Safe.from_string {|{"a":1,"\u0061":2}|} in
+  Alcotest.check_raises "escaped spelling of same key rejected"
+    (Canonical_json.Duplicate_key "duplicate object key: a")
+    (fun () -> ignore (Canonical_json.canonicalize_json v))
+
+let test_duplicate_key_in_array () =
+  let v = Yojson.Safe.from_string {|[{"k":1,"k":2}]|} in
+  Alcotest.check_raises "duplicate key in object inside array rejected"
+    (Canonical_json.Duplicate_key "duplicate object key: k")
+    (fun () -> ignore (Canonical_json.canonicalize_json v))
+
+(* Distinct keys that merely share a prefix must NOT be flagged. *)
+let test_distinct_keys_allowed () =
+  let v = Yojson.Safe.from_string {|{"aa":1,"ab":2}|} in
+  Alcotest.(check string)
+    "distinct sibling keys pass"
+    {|{"aa":1,"ab":2}|}
+    (Canonical_json.canonicalize_json v)
+
+let test_no_duplicates_mixed_allowed () =
+  let v = Yojson.Safe.from_string {|{"b":1,"a":[1,2]}|} in
+  Alcotest.(check string)
+    "object with array value and unique keys passes"
+    {|{"a":[1,2],"b":1}|}
+    (Canonical_json.canonicalize_json v)
+
 let () =
   Alcotest.run "BAION Canonical JSON Conformance"
     [
@@ -144,6 +189,21 @@ let () =
             test_nul_rejected_in_key;
           Alcotest.test_case "literal backslash + u0000 text allowed" `Quick
             test_backslash_u0000_text_allowed;
+        ] );
+      ( "duplicate_key_rejection",
+        [
+          Alcotest.test_case "duplicate key at top level rejected" `Quick
+            test_duplicate_key_top_level;
+          Alcotest.test_case "duplicate key in nested object rejected" `Quick
+            test_duplicate_key_nested;
+          Alcotest.test_case "escaped spelling of same key rejected" `Quick
+            test_duplicate_key_escaped;
+          Alcotest.test_case "duplicate key inside array rejected" `Quick
+            test_duplicate_key_in_array;
+          Alcotest.test_case "distinct sibling keys allowed" `Quick
+            test_distinct_keys_allowed;
+          Alcotest.test_case "unique keys with array value allowed" `Quick
+            test_no_duplicates_mixed_allowed;
         ] );
       ( "hash",
         [
