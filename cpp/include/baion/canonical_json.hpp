@@ -45,6 +45,31 @@ bool contains_nul(const nlohmann::json& j);
 // the decoded-name semantics of the contract.
 bool has_duplicate_keys(const std::string& raw_input);
 
+// ── Number-domain rejection scan ──────────────────────────────
+// CROSS-LINEAGE CONTRACT: any input containing a number outside
+// the supported canonical domain must be rejected before
+// canonicalization. Returns true if any number (at any depth) is:
+//   - written with an exponent (raw token contains 'e' or 'E'),
+//     e.g. 1e2 is rejected even though 100 is accepted — the check
+//     is lexical, on the source spelling, not the value;
+//   - an integer beyond +/-9007199254740992 (2^53, the largest
+//     magnitude every lineage's double can hold exactly);
+//   - a fraction with magnitude in (0, 1e-6) or >= 1e21, where
+//     lineage formatters diverge (scientific-notation thresholds).
+// Note: this operates on the RAW input text via nlohmann's SAX
+// interface, because number_float() receives the unmodified source
+// token alongside the parsed value — the DOM erases the spelling.
+bool has_unsupported_number(const std::string& raw_input);
+
+// ── UTF-8 BOM rejection scan ──────────────────────────────────
+// CROSS-LINEAGE CONTRACT: a leading UTF-8 byte-order mark
+// (EF BB BF) is rejected, not skipped — RFC 8259 §8.1 forbids
+// adding a BOM, and silently stripping it would let two byte-
+// distinct inputs hash identically. Checks the first three raw
+// bytes only; a BOM anywhere else is ordinary string content for
+// the parser to judge.
+bool has_utf8_bom(const std::string& raw_input);
+
 // ── Checked canonicalization (library error path) ─────────────
 // Rejection-aware entry point: scans for U+0000 first, then
 // canonicalizes into `out`. Returns false (leaving `out` empty)

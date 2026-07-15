@@ -70,9 +70,24 @@ pub fn canonicalize_value(v: &Value, out: &mut String) {
             if n.is_f64() {
                 let f = n.as_f64().expect("is_f64 implies as_f64 is Some");
                 if f.is_finite() && f == f.trunc() && f.abs() <= 9007199254740992.0 {
+                    // Casting also folds -0.0 to 0 ("-0" would diverge from
+                    // the ES ToString reference, which emits "0").
                     out.push_str(&(f as i64).to_string());
                     return;
                 }
+                // CROSS-LINEAGE CONTRACT: floats must serialize as PLAIN
+                // DECIMAL (ES ToString form), never exponent notation.
+                // serde_json's Number::to_string (Ryu writer) flips to
+                // exponent form below 1e-5 ("1e-6") and near the top of the
+                // domain ("1e20") — diverging from the C/Go/OCaml reference.
+                // Rust std Display for f64 is shortest-roundtrip and never
+                // uses exponent notation, which matches ES ToString exactly
+                // across the whole supported domain [1e-6, 1e21); the raw
+                // lexical gate (num_check) has already rejected anything
+                // outside it. Integer-valued floats past 2^53 (e.g. 1e20)
+                // land here too — Display gives the full digit string.
+                out.push_str(&format!("{}", f));
+                return;
             }
             out.push_str(&n.to_string());
         }
@@ -193,6 +208,50 @@ mod tests {
         let j = json!({"vals": [1.0_f64, 2.0_f64], "neg": -7.0_f64, "frac": 1.5_f64});
         let result = canonicalize_json(&j).unwrap();
         assert_eq!(result, r#"{"frac":1.5,"neg":-7,"vals":[1,2]}"#);
+    }
+
+    #[test]
+    fn small_fractions_stay_plain_decimal() {
+        // Ryu's default writer flips to exponent form below 1e-5; the
+        // contract is ES ToString plain decimal down to the 1e-6 floor.
+        let j = json!({"a": 0.001_f64, "b": 0.0001_f64, "c": 0.00001_f64, "d": 0.000001_f64});
+        let result = canonicalize_json(&j).unwrap();
+        assert_eq!(
+            result,
+            r#"{"a":0.001,"b":0.0001,"c":0.00001,"d":0.000001}"#
+        );
+    }
+
+    #[test]
+    fn small_fraction_with_significand_plain_decimal() {
+        let j = json!({"x": 0.000123_f64});
+        assert_eq!(canonicalize_json(&j).unwrap(), r#"{"x":0.000123}"#);
+    }
+
+    #[test]
+    fn large_float_prints_full_digit_string() {
+        // 100000000000000000000.5 rounds to the double 1e20 — an
+        // integer-valued float past 2^53, so it skips the i64 cast and
+        // must still print as the 21-digit integer form, not "1e20".
+        let j: Value = serde_json::from_str(r#"{"x":100000000000000000000.5}"#).unwrap();
+        assert_eq!(
+            canonicalize_json(&j).unwrap(),
+            r#"{"x":100000000000000000000}"#
+        );
+    }
+
+    #[test]
+    fn negative_zero_canonicalizes_to_zero() {
+        // ES ToString gives "0" for -0; "-0" would break byte parity.
+        let j: Value = serde_json::from_str(r#"{"x":-0.0}"#).unwrap();
+        assert_eq!(canonicalize_json(&j).unwrap(), r#"{"x":0}"#);
+    }
+
+    #[test]
+    fn ordinary_fractions_unchanged_by_plain_decimal_path() {
+        let j = json!({"a": 0.1_f64, "b": 123.456_f64, "c": 0.25_f64, "d": -0.375_f64});
+        let result = canonicalize_json(&j).unwrap();
+        assert_eq!(result, r#"{"a":0.1,"b":123.456,"c":0.25,"d":-0.375}"#);
     }
 
     #[test]

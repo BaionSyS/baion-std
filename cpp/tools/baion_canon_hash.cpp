@@ -3,8 +3,11 @@
 // Reads UTF-8 JSON on stdin, canonicalizes it with the BAION
 // canonical JSON rules, prints the lowercase-hex SHA-256 of the
 // canonical bytes followed by a newline. Exit 0 on success,
-// nonzero on parse error, on U+0000 anywhere in a string, or on
-// a duplicate object key (decoded names) at any depth.
+// nonzero on parse error, on a leading UTF-8 BOM, on U+0000
+// anywhere in a string, on a duplicate object key (decoded names)
+// at any depth, or on a number outside the canonical domain
+// (exponent spelling, integer beyond +/-2^53, out-of-range
+// fraction).
 
 #include "baion/canonical_json.hpp"
 #include "baion/hash.hpp"
@@ -19,6 +22,17 @@ int main()
     // Slurp all of stdin — canonicalization needs the full document.
     std::string input((std::istreambuf_iterator<char>(std::cin)),
                       std::istreambuf_iterator<char>());
+
+    // BOM scan on the RAW bytes before any parse — nlohmann would
+    // silently skip a leading UTF-8 BOM, letting a BOM-prefixed
+    // document hash identically to its BOM-free twin.
+    if (baion::std_lib::has_utf8_bom(input))
+    {
+        std::fprintf(stderr,
+                     "baion_canon_hash: input starts with a UTF-8 BOM — "
+                     "unsupported, rejected\n");
+        return 1;
+    }
 
     // Non-throwing parse (library is built with -fno-exceptions).
     nlohmann::json j = nlohmann::json::parse(input, nullptr, false);
@@ -36,6 +50,18 @@ int main()
         std::fprintf(stderr,
                      "baion_canon_hash: input contains a duplicate object "
                      "key — rejected\n");
+        return 1;
+    }
+
+    // Number-domain scan on the RAW input — the exponent check is
+    // lexical (1e2 rejected, 100 accepted), so it needs the source
+    // tokens the DOM parse discards (cross-lineage contract).
+    if (baion::std_lib::has_unsupported_number(input))
+    {
+        std::fprintf(stderr,
+                     "baion_canon_hash: input contains an unsupported "
+                     "number (exponent notation, integer beyond +/-2^53, "
+                     "or out-of-range fraction) — rejected\n");
         return 1;
     }
 

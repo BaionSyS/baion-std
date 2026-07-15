@@ -174,6 +174,102 @@ static void test_duplicate_key_rejection(void)
     ASSERT_INT_EQ(dup_check("{\"b\":1,\"a\":[1,2]}"), BAION_OK);
 }
 
+static void test_float_shortest_roundtrip(void)
+{
+    /* Each case: shortest decimal string that roundtrips to the same double,
+     * positional layout (no exponent), per RFC 8785 / ECMA-262. The old
+     * %.17g path printed 0.1 as "0.10000000000000001", diverging from every
+     * other lineage. */
+    static const struct
+    {
+        double v;
+        const char* expect;
+    } cases[] = {
+        {0.1, "0.1"},
+        {123.456, "123.456"},
+        {0.5, "0.5"},
+        {0.000001, "0.000001"},         /* n = -5 boundary: "0." + 5 zeros + D */
+        {1e16, "10000000000000000"},    /* dl < n: zero-padded, no dot */
+        {9007199254740992.0, "9007199254740992"}, /* 2^53: above %lld branch cutoff */
+        {-2.5, "-2.5"},
+        {1.0, "1"},   /* integer-valued keeps no-trailing-".0" behavior */
+        {-0.0, "0"},  /* zero (incl. negative zero) always emits exactly "0" */
+    };
+
+    for (size_t k = 0; k < sizeof(cases) / sizeof(cases[0]); k++)
+    {
+        cJSON* n = cJSON_CreateNumber(cases[k].v);
+        char* json = baion_canonicalize_json(n);
+        ASSERT_STR_EQ(json, cases[k].expect);
+        free(json);
+        cJSON_Delete(n);
+    }
+}
+
+static void test_number_domain_rejection(void)
+{
+    /* Exponent notation: out of domain even when the value is in range —
+     * the scan is LEXICAL, "1e2" and "100" must not both canonicalize. */
+    const char* exp_lower = "{\"x\":1e2}";
+    ASSERT_INT_EQ(baion_reject_number_domain(exp_lower, strlen(exp_lower)), BAION_ERR_PARSE);
+    const char* exp_upper = "{\"x\":1E5}";
+    ASSERT_INT_EQ(baion_reject_number_domain(exp_upper, strlen(exp_upper)), BAION_ERR_PARSE);
+    const char* exp_neg = "{\"x\":1e-7}";
+    ASSERT_INT_EQ(baion_reject_number_domain(exp_neg, strlen(exp_neg)), BAION_ERR_PARSE);
+    const char* exp_huge = "{\"x\":1e400}";
+    ASSERT_INT_EQ(baion_reject_number_domain(exp_huge, strlen(exp_huge)), BAION_ERR_PARSE);
+
+    /* Same value spelled plainly: allowed */
+    const char* plain = "{\"x\":100}";
+    ASSERT_INT_EQ(baion_reject_number_domain(plain, strlen(plain)), BAION_OK);
+
+    /* Integer magnitude: 2^53 itself stays in-domain; 2^53 + 1 is rejected
+     * in both signs (a double compare would round it down and miss it). */
+    const char* at_limit = "{\"x\":9007199254740992}";
+    ASSERT_INT_EQ(baion_reject_number_domain(at_limit, strlen(at_limit)), BAION_OK);
+    const char* over_limit = "{\"x\":9007199254740993}";
+    ASSERT_INT_EQ(baion_reject_number_domain(over_limit, strlen(over_limit)), BAION_ERR_PARSE);
+    const char* neg_over = "{\"x\":-9007199254740993}";
+    ASSERT_INT_EQ(baion_reject_number_domain(neg_over, strlen(neg_over)), BAION_ERR_PARSE);
+
+    /* Longer digit string: rejected by length before any lexicographic step */
+    const char* long_int = "{\"x\":100000000000000000000}";
+    ASSERT_INT_EQ(baion_reject_number_domain(long_int, strlen(long_int)), BAION_ERR_PARSE);
+
+    /* Fraction magnitude: |v| must be 0 or in [1e-6, 1e21) */
+    const char* tiny = "{\"x\":0.0000001}";
+    ASSERT_INT_EQ(baion_reject_number_domain(tiny, strlen(tiny)), BAION_ERR_PARSE);
+    const char* micro = "{\"x\":0.000001}";
+    ASSERT_INT_EQ(baion_reject_number_domain(micro, strlen(micro)), BAION_OK);
+    const char* huge_frac = "{\"x\":1000000000000000000000.5}";
+    ASSERT_INT_EQ(baion_reject_number_domain(huge_frac, strlen(huge_frac)), BAION_ERR_PARSE);
+    const char* zero_frac = "{\"x\":0.0}";
+    ASSERT_INT_EQ(baion_reject_number_domain(zero_frac, strlen(zero_frac)), BAION_OK);
+
+    /* Number-shaped text inside string literals is NOT a number token —
+     * including behind an escaped quote, which must not close the string. */
+    const char* in_string = "{\"x\":\"1e400\"}";
+    ASSERT_INT_EQ(baion_reject_number_domain(in_string, strlen(in_string)), BAION_OK);
+    const char* esc_quote = "{\"a\\\"e\":\"9E99\",\"x\":2}";
+    ASSERT_INT_EQ(baion_reject_number_domain(esc_quote, strlen(esc_quote)), BAION_OK);
+}
+
+static void test_bom_rejection(void)
+{
+    /* Leading UTF-8 BOM: cJSON would silently skip it, collapsing the
+     * BOM-prefixed and BOM-free documents onto one hash — reject. */
+    const char* bom_doc = "\xEF\xBB\xBF{\"a\":1}";
+    ASSERT_INT_EQ(baion_reject_bom(bom_doc, strlen(bom_doc)), BAION_ERR_PARSE);
+
+    /* Same document without the BOM: allowed */
+    const char* clean = "{\"a\":1}";
+    ASSERT_INT_EQ(baion_reject_bom(clean, strlen(clean)), BAION_OK);
+
+    /* BOM bytes NOT at the very start are just string content: allowed */
+    const char* interior = "{\"a\":\"\xEF\xBB\xBF\"}";
+    ASSERT_INT_EQ(baion_reject_bom(interior, strlen(interior)), BAION_OK);
+}
+
 int main(void)
 {
     printf("test_canonical_json:\n");
@@ -185,6 +281,9 @@ int main(void)
     RUN_TEST(test_booleans);
     RUN_TEST(test_u0000_rejection);
     RUN_TEST(test_duplicate_key_rejection);
+    RUN_TEST(test_float_shortest_roundtrip);
+    RUN_TEST(test_number_domain_rejection);
+    RUN_TEST(test_bom_rejection);
     TEST_SUMMARY();
     return _test_failed;
 }

@@ -1,0 +1,19 @@
+{"name": "nul_in_value", "input": "{\"x\":\"a\\u0000b\"}", "reason": "U+0000 not representable losslessly in all lineages"}
+{"name": "nul_in_key", "input": "{\"a\\u0000\":1}", "reason": "U+0000 not representable losslessly in all lineages"}
+{"name": "dup_key_toplevel", "input": "{\"a\":1,\"a\":2}", "reason": "RFC 8259 duplicate-name behavior undefined; three-way divergence observed"}
+{"name": "dup_key_nested", "input": "{\"x\":{\"b\":1,\"b\":2}}", "reason": "duplicate detection required at any depth"}
+{"name": "dup_key_escaped", "input": "{\"a\":1,\"\\u0061\":2}", "reason": "duplicates compare on the DECODED name"}
+{"name": "dup_key_in_array", "input": "[{\"k\":1,\"k\":2}]", "reason": "duplicate detection inside objects nested in arrays"}
+{"name": "exponent_lower", "input": "{\"x\":1e21}", "reason": "exponent tokens outside plain-decimal domain"}
+{"name": "exponent_upper", "input": "{\"x\":1E5}", "reason": "exponent tokens outside plain-decimal domain (case-insensitive)"}
+{"name": "exponent_tiny", "input": "{\"x\":1e-7}", "reason": "five-way float-format divergence observed"}
+{"name": "exponent_overflow", "input": "{\"x\":1e400}", "reason": "overflows double; three accept/four reject divergence observed"}
+{"name": "int_beyond_2_53", "input": "{\"x\":9007199254740993}", "reason": "beyond IEEE-754 exact-integer range"}
+{"name": "neg_int_beyond_2_53", "input": "{\"x\":-9007199254740993}", "reason": "beyond IEEE-754 exact-integer range"}
+{"name": "decimal_below_1e_minus_6", "input": "{\"x\":0.0000001}", "reason": "RFC 8785 emits exponent form below 1e-6; outside plain-decimal domain"}
+{"name": "lone_high_surrogate", "input": "{\"x\":\"\\ud800\"}", "reason": "unpaired surrogate is not a Unicode scalar value"}
+{"name": "leading_bom", "input": "\ufeff{\"a\":1}", "reason": "BOM is not JSON; two lineages silently skipped it"}
+{"name": "trailing_garbage", "input": "{\"a\":1} x", "reason": "input must be exactly one JSON document"}
+{"name": "two_documents", "input": "{\"a\":1}{\"b\":2}", "reason": "input must be exactly one JSON document"}
+{"name": "trailing_comma", "input": "{\"a\":1,}", "reason": "not valid RFC 8259 JSON"}
+{"name": "empty_input", "input": "", "reason": "input must be exactly one JSON document"}

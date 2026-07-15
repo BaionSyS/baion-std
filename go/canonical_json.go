@@ -36,6 +36,27 @@ var ErrEmbeddedNUL = errors.New("embedded U+0000 in string")
 // different values from the same bytes and silently break hash parity.
 var ErrDuplicateKey = errors.New("duplicate object key")
 
+// ErrUnsupportedNumber rejects inputs containing a number token outside the
+// cross-lineage numeric domain: exponent spellings, integers beyond ±2^53,
+// and fractions outside [1e-6, 1e21).
+//
+// CROSS-LINEAGE CONTRACT: every language implementation uniformly REJECTS
+// these tokens — float formatters across the seven lineages diverge exactly
+// there (exponent notation, sub-1e-6 / ≥1e21 magnitudes, >2^53 precision
+// loss), so accepting them would let two lineages emit different canonical
+// bytes for the same input. The check is LEXICAL on the raw token spelling:
+// `100` is in-domain while `1e2` is rejected even though the values are equal.
+var ErrUnsupportedNumber = errors.New("unsupported number outside the cross-lineage numeric domain")
+
+// ErrLoneSurrogate rejects inputs containing an unpaired UTF-16 surrogate
+// escape (\uD800–\uDFFF without its partner) inside a JSON string.
+//
+// CROSS-LINEAGE CONTRACT: every sibling lineage rejects lone surrogates at
+// parse time; Go's decoder alone silently replaces them with U+FFFD, which
+// would let Go produce a hash for input no sibling accepts. This must be
+// detected on the RAW bytes — after decode the evidence is destroyed.
+var ErrLoneSurrogate = errors.New("unsupported unpaired surrogate escape in string")
+
 // CheckNoDuplicateKeys scans raw JSON input for duplicate object member names
 // at any depth and returns ErrDuplicateKey if one is found.
 //
@@ -107,6 +128,147 @@ func CheckNoDuplicateKeys(data []byte) error {
 		}
 		completeValue()
 	}
+}
+
+// CheckNumberDomain scans raw JSON input and returns ErrUnsupportedNumber for
+// any number token outside the cross-lineage domain:
+//
+//   - exponent spellings (any 'e'/'E' in the token) — lexical, value-blind;
+//   - integer tokens (no '.') whose magnitude exceeds 9007199254740992 (2^53);
+//   - fraction tokens whose value v satisfies (v != 0 && |v| < 1e-6) || |v| >= 1e21.
+//
+// This check MUST run on the raw input bytes: json.Number preserves the raw
+// token spelling (Decoder.Token honors UseNumber), which is the only place
+// `100` and `1e2` are still distinguishable — the decoded value tree cannot
+// make that distinction.
+func CheckNumberDomain(data []byte) error {
+	dec := json.NewDecoder(bytes.NewReader(data))
+	// UseNumber makes Token() yield json.Number carrying the RAW token
+	// spelling — required for the lexical exponent check.
+	dec.UseNumber()
+	for {
+		tok, err := dec.Token()
+		if err == io.EOF {
+			return nil
+		}
+		if err != nil {
+			// Malformed JSON is not this check's verdict — the caller's
+			// decode pass reports syntax errors with proper diagnostics.
+			return nil
+		}
+		n, ok := tok.(json.Number)
+		if !ok {
+			continue
+		}
+		s := string(n)
+		if strings.ContainsAny(s, "eE") {
+			return ErrUnsupportedNumber
+		}
+		if !strings.Contains(s, ".") {
+			// Digit-string comparison, not ParseInt: stays exact for tokens
+			// wider than any machine integer.
+			if integerExceedsSafeRange(s) {
+				return ErrUnsupportedNumber
+			}
+			continue
+		}
+		// Fraction token: range-check the value. ParseFloat overflow returns
+		// ±Inf with ErrRange, which the >= 1e21 branch catches, so the error
+		// itself needs no separate handling.
+		v, _ := strconv.ParseFloat(s, 64)
+		if (v != 0 && math.Abs(v) < 1e-6) || math.Abs(v) >= 1e21 {
+			return ErrUnsupportedNumber
+		}
+	}
+}
+
+// integerExceedsSafeRange reports whether an exponent-free integer token's
+// magnitude exceeds 2^53 (9007199254740992), comparing digit strings so
+// arbitrarily wide tokens are judged exactly.
+func integerExceedsSafeRange(s string) bool {
+	digits := strings.TrimPrefix(s, "-")
+	digits = strings.TrimLeft(digits, "0")
+	if digits == "" {
+		return false // zero
+	}
+	const maxSafe = "9007199254740992" // 2^53
+	if len(digits) != len(maxSafe) {
+		return len(digits) > len(maxSafe)
+	}
+	return digits > maxSafe
+}
+
+// CheckNoLoneSurrogates scans raw JSON input for unpaired UTF-16 surrogate
+// escapes and returns ErrLoneSurrogate if one is found: a \uD800–\uDBFF escape
+// not immediately followed by an escaped \uDC00–\uDFFF, or a \uDC00–\uDFFF
+// escape with no preceding high half.
+//
+// Backslash-run parity decides whether a `\u` is an active escape: an escape
+// starts only on the odd trailing backslash of a run, so `\\ud800` (a literal
+// backslash followed by the text "ud800") is NOT a surrogate and passes.
+// Escapes only occur inside strings in well-formed JSON; a stray backslash
+// elsewhere is a syntax error the decode pass rejects anyway, so scanning the
+// whole input is safe.
+func CheckNoLoneSurrogates(data []byte) error {
+	for i := 0; i < len(data); {
+		if data[i] != '\\' {
+			i++
+			continue
+		}
+		j := i
+		for j < len(data) && data[j] == '\\' {
+			j++
+		}
+		run := j - i
+		i = j
+		if run%2 == 0 {
+			continue // backslashes pair off into literal backslashes
+		}
+		// The trailing odd backslash escapes data[j].
+		if j >= len(data) || data[j] != 'u' {
+			i = j + 1
+			continue
+		}
+		cp, ok := hex4(data, j+1)
+		if !ok {
+			// Malformed \u escape — the decode pass reports it.
+			i = j + 1
+			continue
+		}
+		switch {
+		case cp >= 0xD800 && cp <= 0xDBFF:
+			// High surrogate: valid only when immediately followed by an
+			// escaped low surrogate.
+			paired := false
+			if j+11 <= len(data) && data[j+5] == '\\' && data[j+6] == 'u' {
+				if lo, ok2 := hex4(data, j+7); ok2 && lo >= 0xDC00 && lo <= 0xDFFF {
+					paired = true
+				}
+			}
+			if !paired {
+				return ErrLoneSurrogate
+			}
+			i = j + 11 // consume the pair so its low half is not re-seen as lone
+		case cp >= 0xDC00 && cp <= 0xDFFF:
+			// Low surrogate reached without a consuming high half above.
+			return ErrLoneSurrogate
+		default:
+			i = j + 5
+		}
+	}
+	return nil
+}
+
+// hex4 parses four hex digits at data[pos:pos+4] as a code unit.
+func hex4(data []byte, pos int) (uint32, bool) {
+	if pos+4 > len(data) {
+		return 0, false
+	}
+	v, err := strconv.ParseUint(string(data[pos:pos+4]), 16, 32)
+	if err != nil {
+		return 0, false
+	}
+	return uint32(v), true
 }
 
 // CanonicalizeJSON converts any JSON-compatible value to canonical JSON string.
@@ -277,6 +439,13 @@ func formatFloat64(v float64) string {
 	}
 	if math.IsInf(v, -1) {
 		return "null"
+	}
+	// CROSS-LINEAGE CONTRACT: any zero emits exactly "0" (RFC 8785 §3.2.2.3 /
+	// ES ToString). -0.0 == 0 in Go, so this also catches negative zero, which
+	// FormatFloat would otherwise spell "-0" and break parity with the five
+	// lineages that emit "0".
+	if v == 0 {
+		return "0"
 	}
 	return strconv.FormatFloat(v, 'f', -1, 64)
 }

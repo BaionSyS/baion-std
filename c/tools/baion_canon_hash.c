@@ -54,6 +54,16 @@ int main(void)
         return -BAION_ERR_PARSE;
     }
 
+    /* Pre-parse BOM rejection (library-level scan): cJSON silently skips a
+       leading UTF-8 BOM, so a BOM-prefixed document would hash identically
+       to its BOM-free twin. Reviewer contract: reject with exit 1. */
+    if (baion_reject_bom(input, len) != BAION_OK)
+    {
+        fprintf(stderr, "baion_canon_hash: leading UTF-8 BOM in input is unsupported\n");
+        free(input);
+        return 1;
+    }
+
     /* Pre-parse U+0000 rejection (library-level scan): cJSON decodes the
        u0000 escape into a NUL byte that truncates the C string, so distinct
        documents would collapse onto one canonical form. Reviewer contract:
@@ -61,6 +71,19 @@ int main(void)
     if (baion_reject_u0000(input, len) != BAION_OK)
     {
         fprintf(stderr, "baion_canon_hash: U+0000 in input is unsupported\n");
+        free(input);
+        return 1;
+    }
+
+    /* Pre-parse number-domain rejection (library-level LEXICAL scan): cJSON
+       collapses "100" and "1e2" onto the same double, so only the raw token
+       spelling can enforce the plain-decimal domain (no exponent notation,
+       integers within 2^53, fractions in [1e-6, 1e21)). Reviewer contract:
+       reject with exit 1. */
+    if (baion_reject_number_domain(input, len) != BAION_OK)
+    {
+        fprintf(stderr,
+                "baion_canon_hash: number outside plain-decimal domain is unsupported\n");
         free(input);
         return 1;
     }
