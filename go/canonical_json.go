@@ -17,6 +17,7 @@ import (
 	"sort"
 	"strconv"
 	"strings"
+	"unicode/utf8"
 )
 
 // ErrEmbeddedNUL rejects inputs whose strings contain U+0000.
@@ -48,6 +49,17 @@ var ErrDuplicateKey = errors.New("duplicate object key")
 // `100` is in-domain while `1e2` is rejected even though the values are equal.
 var ErrUnsupportedNumber = errors.New("unsupported number outside the cross-lineage numeric domain")
 
+// ErrInvalidUTF8 rejects inputs whose raw bytes are not well-formed UTF-8.
+//
+// CROSS-LINEAGE CONTRACT: every language implementation uniformly REJECTS
+// input that is not valid UTF-8 — Go's encoding/json alone silently replaces
+// invalid byte sequences with U+FFFD, which would let Go hash input no
+// sibling accepts (and hash it to bytes no sibling would ever produce): a
+// silent cross-lineage collision split. The check must run on the RAW input
+// bytes, before decoding, because the decoder's U+FFFD substitution destroys
+// the evidence.
+var ErrInvalidUTF8 = errors.New("invalid or unsupported UTF-8 in input")
+
 // ErrLoneSurrogate rejects inputs containing an unpaired UTF-16 surrogate
 // escape (\uD800–\uDFFF without its partner) inside a JSON string.
 //
@@ -56,6 +68,23 @@ var ErrUnsupportedNumber = errors.New("unsupported number outside the cross-line
 // would let Go produce a hash for input no sibling accepts. This must be
 // detected on the RAW bytes — after decode the evidence is destroyed.
 var ErrLoneSurrogate = errors.New("unsupported unpaired surrogate escape in string")
+
+// CheckValidUTF8 verifies the raw input bytes are well-formed UTF-8 and
+// returns ErrInvalidUTF8 otherwise.
+//
+// This check MUST run on the raw input bytes, before any decode: Go's
+// encoding/json accepts invalid UTF-8 and silently substitutes U+FFFD, so a
+// post-decode check can never see the bad bytes. utf8.Valid uses strict UTF-8
+// decoding — it rejects overlong encodings, truncated sequences, stray
+// continuation bytes, AND UTF-8-encoded surrogate code points (0xED 0xA0 0x80
+// decodes as RuneError with size 1), so no separate surrogate-byte check is
+// needed here (escaped \uD800 surrogates are CheckNoLoneSurrogates' job).
+func CheckValidUTF8(data []byte) error {
+	if !utf8.Valid(data) {
+		return ErrInvalidUTF8
+	}
+	return nil
+}
 
 // CheckNoDuplicateKeys scans raw JSON input for duplicate object member names
 // at any depth and returns ErrDuplicateKey if one is found.

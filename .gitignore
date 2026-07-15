@@ -9,3 +9,4 @@
 /*/.dub/
 *.o
 *.a
+conformance/__pycache__/

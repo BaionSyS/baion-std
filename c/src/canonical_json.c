@@ -393,6 +393,290 @@ int baion_reject_bom(const char* input, size_t len)
     return BAION_OK;
 }
 
+/* CROSS-LINEAGE CONTRACT: raw control bytes are rejected LEXICALLY in every
+ * lineage per RFC 8259 — cJSON alone accepts raw controls inside strings AND
+ * skips any byte <= 0x20 between tokens as whitespace, so without this scan C
+ * would hash documents the sibling lineages reject. Escaped forms (the
+ * backslash-t and backslash-u001F spellings) are escape TEXT — bytes 0x5C
+ * 0x74 etc., never a raw byte < 0x20 — so a byte-level check cannot
+ * false-positive on them. */
+int baion_reject_raw_controls(const char* input, size_t len)
+{
+    int in_string = 0;
+    for (size_t i = 0; i < len; i++)
+    {
+        unsigned char c = (unsigned char)input[i];
+
+        if (in_string)
+        {
+            /* Inside a string literal EVERY control byte is illegal — RFC
+             * 8259 requires U+0000..U+001F to appear only in escaped form. */
+            if (c < 0x20)
+                return BAION_ERR_PARSE;
+            if (c == '\\')
+            {
+                /* Escape neutralizes the next byte so an escaped quote
+                 * cannot close the string — but that neutralized byte is
+                 * still a raw byte and still must not be a control. */
+                if (i + 1 < len)
+                {
+                    i++;
+                    if ((unsigned char)input[i] < 0x20)
+                        return BAION_ERR_PARSE;
+                }
+            }
+            else if (c == '"')
+                in_string = 0;
+        }
+        else
+        {
+            if (c == '"')
+                in_string = 1;
+            /* Between tokens only TAB/LF/CR (and space, >= 0x20) are legal
+             * JSON whitespace — cJSON's skip wrongly treats 0x01..0x08,
+             * 0x0B, 0x0C, 0x0E..0x1F as skippable too. */
+            else if (c < 0x20 && c != 0x09 && c != 0x0A && c != 0x0D)
+                return BAION_ERR_PARSE;
+        }
+    }
+    return BAION_OK;
+}
+
+/* CROSS-LINEAGE CONTRACT: input byte streams must be well-formed UTF-8 per
+ * RFC 3629 in every lineage — cJSON copies string bytes through unexamined,
+ * so C alone would hash documents whose bytes the sibling lineages (C++,
+ * Rust, Haskell) reject at decode time. Runs over the WHOLE raw input, not
+ * just string interiors: any byte >= 0x80 outside a string is malformed JSON
+ * anyway, so whole-stream validation cannot false-positive on legal input. */
+int baion_reject_invalid_utf8(const char* input, size_t len)
+{
+    size_t i = 0;
+    while (i < len)
+    {
+        unsigned char b0 = (unsigned char)input[i];
+        size_t cont;               /* continuation bytes required after b0 */
+        unsigned char lo = 0x80;   /* legal range for the FIRST continuation */
+        unsigned char hi = 0xBF;   /* byte — tightened per lead to exclude   */
+                                   /* overlong forms, surrogates, > U+10FFFF */
+        if (b0 <= 0x7F)
+        {
+            i++;
+            continue;
+        }
+        else if (b0 >= 0xC2 && b0 <= 0xDF)
+            cont = 1;
+        else if (b0 == 0xE0)
+        {
+            /* E0 80-9F would re-encode U+0000..U+07FF overlong */
+            cont = 2;
+            lo = 0xA0;
+        }
+        else if ((b0 >= 0xE1 && b0 <= 0xEC) || b0 == 0xEE || b0 == 0xEF)
+            cont = 2;
+        else if (b0 == 0xED)
+        {
+            /* ED A0-BF encodes U+D800..U+DFFF — surrogates are not scalar
+             * values and RFC 3629 forbids their encoded form outright. */
+            cont = 2;
+            hi = 0x9F;
+        }
+        else if (b0 == 0xF0)
+        {
+            /* F0 80-8F would re-encode U+0000..U+FFFF overlong */
+            cont = 3;
+            lo = 0x90;
+        }
+        else if (b0 >= 0xF1 && b0 <= 0xF3)
+            cont = 3;
+        else if (b0 == 0xF4)
+        {
+            /* F4 90+ encodes values above U+10FFFF */
+            cont = 3;
+            hi = 0x8F;
+        }
+        else
+        {
+            /* 0x80-0xBF: continuation byte without a lead.
+             * 0xC0/0xC1: leads that can only produce overlong encodings.
+             * 0xF5-0xFF: leads for values above U+10FFFF (or not UTF-8). */
+            return BAION_ERR_PARSE;
+        }
+
+        if (i + cont >= len)
+            return BAION_ERR_PARSE; /* truncated sequence at end of input */
+        unsigned char b1 = (unsigned char)input[i + 1];
+        if (b1 < lo || b1 > hi)
+            return BAION_ERR_PARSE;
+        for (size_t k = 2; k <= cont; k++)
+        {
+            unsigned char bk = (unsigned char)input[i + k];
+            if (bk < 0x80 || bk > 0xBF)
+                return BAION_ERR_PARSE;
+        }
+        i += cont + 1;
+    }
+    return BAION_OK;
+}
+
+/* CROSS-LINEAGE CONTRACT: escape SHAPE is enforced lexically in every lineage
+ * per RFC 8259 §7 — cJSON's parse_hex4 tolerates fewer than 4 hex digits in
+ * some malformed inputs (fuzzer round 5: the 5-char "backslash-u-0-0-e-s" and
+ * short "backslash-u-d-8-3" forms parsed), so without this scan C would hash
+ * documents the sibling lineages reject. Pairing validity of surrogate
+ * escapes is a separate concern handled after decode; this scan checks only
+ * lexical shape: one of the eight single-char escapes, or 'u' + exactly 4 hex
+ * digits. */
+int baion_reject_malformed_escapes(const char* input, size_t len)
+{
+    int in_string = 0;
+    for (size_t i = 0; i < len; i++)
+    {
+        char c = input[i];
+        if (!in_string)
+        {
+            if (c == '"')
+                in_string = 1;
+            continue;
+        }
+        if (c == '"')
+        {
+            in_string = 0;
+            continue;
+        }
+        if (c != '\\')
+            continue;
+
+        if (i + 1 >= len)
+            return BAION_ERR_PARSE; /* backslash at end of input */
+        char e = input[++i];
+        switch (e)
+        {
+        case '"':
+        case '\\':
+        case '/':
+        case 'b':
+        case 'f':
+        case 'n':
+        case 'r':
+        case 't':
+            break;
+        case 'u':
+        {
+            if (i + 4 >= len)
+                return BAION_ERR_PARSE; /* truncated backslash-u escape */
+            for (size_t k = 1; k <= 4; k++)
+            {
+                char h = input[i + k];
+                if (!((h >= '0' && h <= '9') || (h >= 'a' && h <= 'f')
+                      || (h >= 'A' && h <= 'F')))
+                    return BAION_ERR_PARSE;
+            }
+            i += 4;
+            break;
+        }
+        default:
+            return BAION_ERR_PARSE; /* not one of the eight escapes or 'u' */
+        }
+    }
+    return BAION_OK;
+}
+
+/* CROSS-LINEAGE CONTRACT: RFC 8259 §6 number SHAPE is enforced lexically in
+ * every lineage — cJSON accepts leading zeros ("0635", "-004") and bare
+ * trailing dots ("0."), which the sibling lineages reject at parse time.
+ * Shape checked here: optional '-', then '0' or [1-9] digits (no leading
+ * zeros), then optional '.' followed by AT LEAST one digit. Exponent text is
+ * NOT judged here — baion_reject_number_domain already rejects every e/E
+ * token, and this scan must not disturb that verdict. */
+int baion_reject_number_grammar(const char* input, size_t len)
+{
+    size_t i = 0;
+    while (i < len)
+    {
+        char c = input[i];
+
+        if (c == '"')
+        {
+            /* Skip string literals — same escape rule as the sibling scans:
+             * a backslash neutralizes the next char so an escaped quote
+             * cannot close the string. */
+            i++;
+            while (i < len && input[i] != '"')
+            {
+                if (input[i] == '\\' && i + 1 < len)
+                    i++;
+                i++;
+            }
+            i++;
+            continue;
+        }
+
+        if (c == '-' || (c >= '0' && c <= '9'))
+        {
+            /* Consume the same token alphabet as baion_reject_number_domain
+             * so both scans agree on token extent. */
+            size_t start = i;
+            int has_exp = 0;
+            while (i < len)
+            {
+                char t = input[i];
+                if (t >= '0' && t <= '9')
+                {
+                    /* digit: always part of the token */
+                }
+                else if (t == '.')
+                {
+                    /* dot: part of the token (validity judged below) */
+                }
+                else if (t == 'e' || t == 'E')
+                    has_exp = 1;
+                else if ((t == '+' || t == '-') && (i == start || has_exp))
+                {
+                    /* sign: leading minus or exponent sign only */
+                }
+                else
+                    break;
+                i++;
+            }
+
+            const char* p = input + start;
+            const char* q = input + i;
+            if (*p == '-')
+                p++;
+            if (p >= q || *p < '0' || *p > '9')
+                return BAION_ERR_PARSE; /* '-' with no integer part */
+            if (*p == '0')
+            {
+                p++;
+                if (p < q && *p >= '0' && *p <= '9')
+                    return BAION_ERR_PARSE; /* leading zero: 0635, -004, 01. */
+            }
+            else
+            {
+                while (p < q && *p >= '0' && *p <= '9')
+                    p++;
+            }
+            if (p < q && *p == '.')
+            {
+                p++;
+                if (p >= q || *p < '0' || *p > '9')
+                    return BAION_ERR_PARSE; /* bare trailing dot: 0. / 01. */
+                while (p < q && *p >= '0' && *p <= '9')
+                    p++;
+            }
+            /* Any residue must be exponent text — that verdict belongs to
+             * baion_reject_number_domain (which rejects all e/E tokens).
+             * Non-exponent residue (e.g. a second dot) is shape-invalid. */
+            if (p < q && *p != 'e' && *p != 'E')
+                return BAION_ERR_PARSE;
+            continue;
+        }
+
+        i++;
+    }
+    return BAION_OK;
+}
+
 /* CROSS-LINEAGE CONTRACT: the plain-decimal number domain is enforced
  * LEXICALLY over the raw token in every lineage — "100" is in-domain while
  * "1e2" is not, even though both parse to the same double. A post-parse

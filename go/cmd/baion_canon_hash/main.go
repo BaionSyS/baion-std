@@ -26,6 +26,14 @@ func main() {
 		os.Exit(1)
 	}
 
+	// UTF-8 validation must run FIRST, on the raw bytes: encoding/json accepts
+	// invalid UTF-8 and silently substitutes U+FFFD, which would hash input
+	// every sibling lineage rejects — a silent cross-lineage collision split.
+	if err := baionstd.CheckValidUTF8(input); err != nil {
+		fmt.Fprintf(os.Stderr, "baion_canon_hash: reject: invalid UTF-8 in input (%v)\n", err)
+		os.Exit(1)
+	}
+
 	// Duplicate-key detection needs the RAW bytes: decoding into
 	// map[string]interface{} keeps only one member per name and destroys the
 	// duplicate, so this contract check must run before the decode below.

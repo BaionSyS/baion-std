@@ -9,9 +9,11 @@ import Baion.STD
 import qualified Data.Aeson as A
 import qualified Data.Aeson.Key as AK
 import qualified Data.Aeson.KeyMap as AKM
+import qualified Data.ByteString as BS
 import qualified Data.ByteString.Char8 as BSC
 import qualified Data.Text as T
 import qualified Data.Text.Encoding as TE
+import Data.Word (Word8)
 import System.Directory (doesFileExist)
 import Test.Tasty
 import Test.Tasty.HUnit
@@ -143,8 +145,143 @@ conformanceTests =
         assertCanonicalizes "{\"x\":0.1}" "{\"x\":0.1}"
         assertCanonicalizes "{\"x\":123.456}" "{\"x\":123.456}"
         assertCanonicalizes "{\"x\":1.5}" "{\"x\":1.5}"
+        assertCanonicalizes "{\"x\":1.0}" "{\"x\":1}",
+      testCase "Test 30: raw control byte inside a string literal rejected" $ do
+        assertControlRejected (rawInString 0x00)
+        assertControlRejected (rawInString 0x01)
+        assertControlRejected (rawInString 0x09) -- raw TAB
+        assertControlRejected (rawInString 0x0a) -- raw LF
+        assertControlRejected (rawInString 0x1e)
+        assertControlRejected (rawInString 0x1f)
+        -- Pin the finding that aeson's Decoding lexer ALSO rejects this
+        -- today — if an aeson upgrade relaxes it, this test still holds
+        -- via checkControlBytes, but the pin documents the redundancy.
+        case A.eitherDecodeStrict' (rawInString 0x09) :: Either String A.Value of
+          Left _ -> return ()
+          Right _ ->
+            assertFailure
+              "aeson newly ACCEPTS raw TAB in a string; checkControlBytes is now the only guard",
+      testCase "Test 31: raw control byte between tokens rejected" $ do
+        assertControlRejected (rawBetweenTokens 0x00)
+        assertControlRejected (rawBetweenTokens 0x02)
+        assertControlRejected (rawBetweenTokens 0x0b) -- VT is not JSON ws
+        assertControlRejected (rawBetweenTokens 0x0c) -- FF is not JSON ws
+        assertControlRejected (rawBetweenTokens 0x1f),
+      testCase "Test 32: legal whitespace between tokens accepted" $ do
+        assertControlAccepted (rawBetweenTokens 0x09) -- TAB
+        assertControlAccepted (rawBetweenTokens 0x0a) -- LF
+        assertControlAccepted (rawBetweenTokens 0x0d) -- CR
+        assertControlAccepted (rawBetweenTokens 0x20) -- space
+        assertControlAccepted (BSC.pack "\n{\"a\":1}\r\n"),
+      testCase "Test 33: escape TEXT passes; escape-aware string skipping" $ do
+        -- Two-char escape text backslash-t / six-char backslash-u001f
+        -- are bytes 0x5C 0x74 / 0x5C 0x75... — never control bytes.
+        assertControlAccepted (BSC.pack "{\"s\":\"a\\tb\"}")
+        assertControlAccepted (BSC.pack "{\"s\":\"a\\u001fb\"}")
+        assertControlAccepted (BSC.pack "{\"s\":\"a\\u0000b\"}")
+        -- Escaped quote must not end the string scan early...
+        assertControlAccepted (BSC.pack "{\"s\":\"a\\\"b\",\"t\":\"c\"}")
+        -- ...and a raw control byte AFTER an escaped quote is still
+        -- inside the string ({"s":"a\"<TAB>b"}).
+        assertControlRejected
+          ( BS.pack
+              [0x7b, 0x22, 0x73, 0x22, 0x3a, 0x22, 0x61, 0x5c, 0x22, 0x09, 0x62, 0x22, 0x7d]
+          )
+        -- A raw control byte as the escaped byte itself (backslash
+        -- immediately followed by raw TAB) is rejected, not skipped.
+        assertControlRejected
+          ( BS.pack
+              [0x7b, 0x22, 0x73, 0x22, 0x3a, 0x22, 0x61, 0x5c, 0x09, 0x62, 0x22, 0x7d]
+          ),
+      -- Tests 34-37: ES-262 shortest-digits contract above 2^53, where
+      -- the exact integer value of a double and its shortest spelling
+      -- diverge. GHC's floatToDigits misses the even-mantissa inclusive
+      -- boundary (emits 17 digits at exact midpoints); shortenScaled in
+      -- CanonicalJson.hs restores the minimum. Expected strings/hashes
+      -- cross-checked against rust/bin/baion_canon_hash 2026-07-15.
+      testCase "Test 34: even-mantissa midpoint uses shortest spelling (fuzzer hash split)" $ do
+        -- double 0x436CF696D61C5C18: exact 65219416364867776, ES-262
+        -- shortest 6521941636486778e1 = 65219416364867780.
+        assertCanonicalizes "65219416364867774.9377591" "65219416364867780"
+        assertHashes
+          "65219416364867774.9377591"
+          "077d9fcc047c90f56dc97fc7dc513bbeb8832b6c2266440f8fb5b7bf958c6596",
+      testCase "Test 35: 1e20-adjacent fraction keeps six-lineage hash" $ do
+        assertCanonicalizes
+          "{\"x\":100000000000000000000.5}"
+          "{\"x\":100000000000000000000}"
+        assertHashes
+          "{\"x\":100000000000000000000.5}"
+          "356acd219b8c369fc389513fb5c3f9fc2977fff3c432bab9df5b1e3a2800b072",
+      testCase "Test 36: 2^53-adjacent integer-valued doubles render the DOUBLE value" $ do
+        -- 9007199254740993 is not representable; the double is ...992.
+        assertCanonicalizes "9007199254740993.0" "9007199254740992"
+        assertHashes
+          "9007199254740993.0"
+          "c681da39d7273a6a24c15c9cac3a75526ff2ecf8ba4ee60346a0c70c8163bdb2"
+        assertCanonicalizes "9007199254740994.5" "9007199254740994"
+        assertHashes
+          "9007199254740994.5"
+          "25aa68783313802627958889943e895749ac4c0c7469b2a305cd450a12120768",
+      testCase "Test 37: big integer-valued doubles cross-checked against rust lineage" $ do
+        assertCanonicalizes "5000000000000000000.7" "5000000000000000000"
+        assertHashes
+          "5000000000000000000.7"
+          "eebc2ee21907fb949e3a007794ca384b1c12a65088f6df41a31687b2a07f3bb8"
+        assertCanonicalizes "314159265358979323.846" "314159265358979300"
+        assertHashes
+          "314159265358979323.846"
+          "8671760432f785f41764e0ee0f2282bc1cdc84cc677ec41e207e750f512d1a06"
+        -- Small integer-valued floats must be untouched by the
+        -- shortening pass (corpus-pinned spellings).
         assertCanonicalizes "{\"x\":1.0}" "{\"x\":1}"
+        assertCanonicalizes "{\"x\":-0.0}" "{\"x\":0}"
     ]
+
+-- Full-pipeline hash pin: decode, canonicalize, SHA-256 the UTF-8
+-- bytes — must equal the six-lineage digest for the same input.
+assertHashes :: String -> String -> Assertion
+assertHashes raw expectedHex =
+  case A.eitherDecodeStrict' (BSC.pack raw) :: Either String A.Value of
+    Left err -> assertFailure ("fixture must parse: " ++ err)
+    Right v -> canonicalSha256Hex (canonicalizeJson v) @?= expectedHex
+
+-- Raw-control-byte payload builders (tests 30-33). HAZARD: the raw
+-- byte is assembled at runtime via BS.pack — never pasted into a
+-- source literal, so no editor/toolchain can normalize it away.
+
+-- | {"s":"a<b>b"} with byte b spliced raw inside the string literal.
+rawInString :: Word8 -> BS.ByteString
+rawInString b =
+  BS.pack [0x7b, 0x22, 0x73, 0x22, 0x3a, 0x22, 0x61, b, 0x62, 0x22, 0x7d]
+
+-- | {"a":1,<b>"b":2} with byte b spliced raw between tokens.
+rawBetweenTokens :: Word8 -> BS.ByteString
+rawBetweenTokens b =
+  BS.pack
+    [0x7b, 0x22, 0x61, 0x22, 0x3a, 0x31, 0x2c, b, 0x22, 0x62, 0x22, 0x3a, 0x32, 0x7d]
+
+-- Raw-control-byte contract (tests 30-33): lexical check over raw
+-- bytes; error text must carry both "unsupported" and "control" so
+-- pipeline greps can classify the failure.
+assertControlRejected :: BS.ByteString -> Assertion
+assertControlRejected raw =
+  case checkControlBytes raw of
+    Left err ->
+      assertBool
+        ("error message must mention unsupported control byte, got: " ++ err)
+        ( T.isInfixOf "unsupported" (T.pack err)
+            && T.isInfixOf "control" (T.pack err)
+        )
+    Right () ->
+      assertFailure ("expected control-byte rejection for: " ++ show raw)
+
+assertControlAccepted :: BS.ByteString -> Assertion
+assertControlAccepted raw =
+  case checkControlBytes raw of
+    Left err ->
+      assertFailure ("expected acceptance for " ++ show raw ++ ", got: " ++ err)
+    Right () -> return ()
 
 -- STRICT single-document contract (tests 15-19): aeson >= 2.2's
 -- eitherDecodeStrict' must consume the whole input as exactly one

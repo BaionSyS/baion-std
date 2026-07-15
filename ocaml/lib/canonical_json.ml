@@ -203,6 +203,203 @@ let check_no_lone_surrogates (raw : string) : unit =
     end
   done
 
+(** Raised when the raw input carries an unescaped control byte
+    (0x00-0x1F) inside a string literal, or a non-whitespace control
+    byte between tokens. *)
+exception Control_char_rejected of string
+
+(* CROSS-LINEAGE CONTRACT: raw (unescaped) control bytes must be
+   rejected by all seven lineage libraries. RFC 8259 §7 requires
+   control characters inside string literals to be escaped, and §2
+   allows only TAB/LF/CR/space as insignificant whitespace between
+   tokens — but yojson accepts a raw 0x01-0x1F byte inside a string
+   literal (e.g. a real TAB in {"s":"a<TAB>b"}) where C++/Rust/Go/D
+   refuse. By parse time that raw byte is indistinguishable from the
+   escaped spelling, so this is a LEXICAL pass over the raw input,
+   sibling of reject_unsupported_numbers and using the same
+   skip-strings walk — except here the bytes INSIDE string literals
+   are the ones inspected. Escaped forms (backslash-t, backslash-u001f)
+   never trip this: they are ordinary printable bytes in the raw text. *)
+let check_no_raw_control_chars (raw : string) : unit =
+  let len = String.length raw in
+  let reject_in_string c =
+    raise
+      (Control_char_rejected
+         (Printf.sprintf
+            "unsupported raw control character (0x%02x) in string literal"
+            (Char.code c)))
+  in
+  let i = ref 0 in
+  while !i < len do
+    let c = raw.[!i] in
+    if c = '"' then begin
+      incr i;
+      let closed = ref false in
+      while (not !closed) && !i < len do
+        let c = raw.[!i] in
+        if Char.code c < 0x20 then reject_in_string c;
+        match c with
+        | '\\' ->
+            (* The escaped byte is still inside the literal: a raw
+               control byte hiding behind a backslash must not ride
+               through on the two-byte skip. *)
+            if !i + 1 < len && Char.code raw.[!i + 1] < 0x20 then
+              reject_in_string raw.[!i + 1];
+            i := !i + 2
+        | '"' ->
+            closed := true;
+            incr i
+        | _ -> incr i
+      done
+    end
+    else begin
+      if Char.code c < 0x20 && c <> '\t' && c <> '\n' && c <> '\r' then
+        raise
+          (Control_char_rejected
+             (Printf.sprintf
+                "unsupported raw control character (0x%02x) between tokens"
+                (Char.code c)));
+      incr i
+    end
+  done
+
+(** Raised when the raw input is not well-formed UTF-8 (RFC 3629). *)
+exception Invalid_utf8 of string
+
+(* CROSS-LINEAGE CONTRACT: the raw input bytes must be well-formed
+   UTF-8 (RFC 3629) in every lineage library. yojson passes invalid
+   byte sequences through string literals verbatim (a stray 0x85
+   continuation byte or a bare 0xE0 lead survives into the canonical
+   bytes), where C++/Rust/Haskell refuse — so validation must happen on
+   the raw bytes before parse. Sibling of reject_unsupported_numbers /
+   check_no_raw_control_chars, but no skip-strings walk: UTF-8
+   well-formedness is a property of the whole byte stream, inside and
+   outside string literals alike. Rejects: stray continuation bytes,
+   truncated sequences, overlong encodings (0xC0/0xC1 leads,
+   0xE0 0x80-0x9F, 0xF0 0x80-0x8F), encoded surrogates
+   (0xED 0xA0-0xBF), and code points above U+10FFFF (0xF4 0x90-0xBF
+   second bytes, 0xF5-0xFF leads). *)
+let check_utf8 (raw : string) : unit =
+  let len = String.length raw in
+  let reject i what =
+    raise
+      (Invalid_utf8
+         (Printf.sprintf "invalid UTF-8 (%s) at byte offset %d" what i))
+  in
+  let cont i =
+    (* A required continuation byte: 0x80-0xBF, and present at all. *)
+    if i >= len then reject i "truncated sequence"
+    else
+      let b = Char.code raw.[i] in
+      if b < 0x80 || b > 0xBF then reject i "truncated sequence"
+  in
+  let i = ref 0 in
+  while !i < len do
+    let b0 = Char.code raw.[!i] in
+    if b0 < 0x80 then incr i
+    else if b0 < 0xC0 then reject !i "stray continuation byte"
+    else if b0 < 0xC2 then
+      (* 0xC0/0xC1 can only encode U+0000-U+007F in two bytes. *)
+      reject !i "overlong encoding"
+    else if b0 < 0xE0 then begin
+      cont (!i + 1);
+      i := !i + 2
+    end
+    else if b0 < 0xF0 then begin
+      (if !i + 1 < len then
+         let b1 = Char.code raw.[!i + 1] in
+         if b0 = 0xE0 && b1 >= 0x80 && b1 <= 0x9F then
+           reject !i "overlong encoding"
+         else if b0 = 0xED && b1 >= 0xA0 && b1 <= 0xBF then
+           (* U+D800-U+DFFF: surrogate code points are not scalar values. *)
+           reject !i "encoded surrogate");
+      cont (!i + 1);
+      cont (!i + 2);
+      i := !i + 3
+    end
+    else if b0 < 0xF5 then begin
+      (if !i + 1 < len then
+         let b1 = Char.code raw.[!i + 1] in
+         if b0 = 0xF0 && b1 >= 0x80 && b1 <= 0x8F then
+           reject !i "overlong encoding"
+         else if b0 = 0xF4 && b1 >= 0x90 && b1 <= 0xBF then
+           reject !i "code point above U+10FFFF");
+      cont (!i + 1);
+      cont (!i + 2);
+      cont (!i + 3);
+      i := !i + 4
+    end
+    else
+      (* 0xF5-0xFF leads would encode code points above U+10FFFF. *)
+      reject !i "code point above U+10FFFF"
+  done
+
+(** Raised when the raw input carries a token outside strict RFC 8259:
+    an unquoted object key or other bare identifier (only true/false/null
+    are legal), or comment syntax. *)
+exception Nonstandard_token of string
+
+(* CROSS-LINEAGE CONTRACT: strict RFC 8259 token grammar in every
+   lineage library. yojson's Safe parser is lax where C++/Rust/Haskell
+   refuse: it accepts unquoted object keys ({tz:true}), // and block
+   comments, and the NaN/Infinity/-Infinity literals. All of these are
+   LEXICAL properties — by parse time an unquoted key is an ordinary
+   string and Infinity is just a float — so this is a raw-text pass
+   using the same skip-strings walk as reject_unsupported_numbers.
+   Outside string literals, a letter may only begin the exact tokens
+   true / false / null, and '/' (comment syntax) never appears at all.
+   Number tokens are consumed opaquely so the 'e' in 1e2 is never
+   misread as an identifier (the number-domain pass owns that error). *)
+let check_strict_tokens (raw : string) : unit =
+  let len = String.length raw in
+  let is_ident_char c =
+    (c >= 'a' && c <= 'z') || (c >= 'A' && c <= 'Z') || c = '_'
+    || (c >= '0' && c <= '9')
+  in
+  let i = ref 0 in
+  while !i < len do
+    let c = raw.[!i] in
+    if c = '"' then begin
+      incr i;
+      let closed = ref false in
+      while (not !closed) && !i < len do
+        match raw.[!i] with
+        | '\\' -> i := !i + 2
+        | '"' ->
+            closed := true;
+            incr i
+        | _ -> incr i
+      done
+    end
+    else if c = '-' || (c >= '0' && c <= '9') then
+      (* Consume a number token opaquely — same char set as
+         reject_unsupported_numbers, which owns number-domain errors. *)
+      while
+        !i < len
+        &&
+        match raw.[!i] with
+        | '0' .. '9' | '-' | '+' | '.' | 'e' | 'E' -> true
+        | _ -> false
+      do
+        incr i
+      done
+    else if c = '/' then
+      raise (Nonstandard_token "unsupported comment syntax")
+    else if (c >= 'a' && c <= 'z') || (c >= 'A' && c <= 'Z') || c = '_' then begin
+      let start = !i in
+      while !i < len && is_ident_char raw.[!i] do
+        incr i
+      done;
+      let tok = String.sub raw start (!i - start) in
+      if tok <> "true" && tok <> "false" && tok <> "null" then
+        raise
+          (Nonstandard_token
+             ("unsupported bare token (unquoted key or non-JSON literal): "
+            ^ tok))
+    end
+    else incr i
+  done
+
 (* CROSS-LINEAGE CONTRACT: objects with duplicate member names (at any
    depth) must be rejected by all seven lineage libraries. yojson's
    Assoc is a plain pair list that preserves EVERY member — including

@@ -75,6 +75,62 @@ def build_cases():
     cases.append(("str_control_escapes", '{"s":"' + BS + 'u0001' + BS + 'u001f"}'))
     cases.append(("str_long", '{"s":"' + "xy" * 512 + '"}'))
 
+    # Raw control bytes: rejected inside strings (RFC 8259 §7 requires the
+    # escape), and outside strings only 0x09/0x0A/0x0D/0x20 are whitespace.
+    for b in [0x01, 0x02, 0x09, 0x0A, 0x0D, 0x1E, 0x1F]:
+        cases.append((f"str_raw_ctrl_{b:02x}", '{"s":"a' + chr(b) + 'b"}'))  # reject
+        cases.append((f"key_raw_ctrl_{b:02x}", '{"a' + chr(b) + '":1}'))     # reject
+    for b in [0x01, 0x02, 0x0B, 0x0C, 0x1F]:
+        cases.append((f"ws_raw_ctrl_{b:02x}", '{"a":1,' + chr(b) + '"b":2}'))  # reject
+    cases.append(("ws_tab_between_tokens", '{"a":' + chr(0x09) + '1}'))   # legal ws
+    cases.append(("ws_crlf_framing", chr(0x0D) + chr(0x0A) + '{"a":1}' + chr(0x0D) + chr(0x0A)))
+
+    # Raw invalid UTF-8 (bytes payloads — cannot be expressed as str). One
+    # lineage replaced bad bytes with U+FFFD and hashed the result: a silent
+    # cross-lineage collision, the worst divergence class. Uniform reject.
+    Q, OPEN, CLOSE = b'"', b'{"', b'":[]}'
+    cases.append(("utf8_stray_lead", OPEN + bytes([0xE0]) + b"a" + CLOSE))          # reject
+    cases.append(("utf8_stray_continuation", Q + b"a" + bytes([0x85]) + b"b" + Q))  # reject
+    cases.append(("utf8_overlong_slash", Q + bytes([0xC0, 0xAF]) + Q))              # reject
+    cases.append(("utf8_encoded_surrogate", Q + bytes([0xED, 0xA0, 0x80]) + Q))     # reject
+    cases.append(("utf8_truncated_2byte", Q + b"a" + bytes([0xC3]) + Q))            # reject
+    cases.append(("utf8_beyond_10ffff", Q + bytes([0xF4, 0x90, 0x80, 0x80]) + Q))   # reject
+    cases.append(("utf8_f5_lead", Q + bytes([0xF5, 0x80, 0x80, 0x80]) + Q))         # reject
+    cases.append(("utf8_valid_2byte", '{"x":"é"}'))                                 # accept
+    cases.append(("utf8_valid_4byte", '{"x":"\U0001F600"}'))                        # accept
+
+    # Number-token grammar edges (RFC 8259: int = 0 / [1-9]digits; frac needs a digit).
+    for v in ["0635", "-004", "01", "007", "03000000000000004"]:
+        cases.append((f"num_leadzero_{v}", v))                            # reject
+    for v in ["0.", "01.", ".5", "-.5", "+1", "-", "2-", "1-", "77-7957", "0635.5"]:
+        cases.append((f"num_malformed_{v}", v))                           # reject
+    cases.append(("num_zero_frac_ok", '{"x":0.25}'))                      # accept
+
+    # Literal spellings must be exact.
+    for v in ["nuLl", "falSe", "tRue", "TRUE", "nul", "truee"]:
+        cases.append((f"lit_{v}", v))                                     # reject
+
+    # Non-JSON extensions some parsers allow: comments, non-finite literals.
+    cases.append(("line_comment", '{"a":1} // note'))                     # reject
+    cases.append(("line_comment_inside", '{"a": // note\n1}'))            # reject
+    cases.append(("block_comment", '{"a":/* note */1}'))                  # reject
+    for v in ["NaN", "Infinity", "-Infinity", "True", "None"]:
+        cases.append((f"nonfinite_{v}", '{"x":' + v + "}"))               # reject
+    cases.append(("nan_in_string_ok", '{"x":"NaN // fine"}'))             # accept
+
+    # Structure lexing: unquoted keys, malformed escapes.
+    cases.append(("unquoted_key", "{tz:true}"))                           # reject
+    cases.append(("short_u_escape", '"' + BS + 'u00es"'))                 # reject
+    cases.append(("short_u_surrogate", '"' + BS + 'ud83' + BS + 'ude00"'))  # reject
+    cases.append(("unknown_escape_q", '"a' + BS + 'qb"'))                 # reject
+    cases.append(("escape_at_eof", '"a' + BS))                            # reject
+
+    # Integer-valued doubles beyond 2^53 entering via fraction tokens:
+    # canonical form is ES-262 SHORTEST digits, not the exact integer value.
+    cases.append(("big_float_shortest", "65219416364867774.9377591"))     # accept, one hash
+    cases.append(("big_float_shortest_2", '{"x":9007199254740993.5}'))
+    cases.append(("big_float_shortest_3", "123456789012345678.9"))
+
     # Structure: duplicates, depth, document framing.
     cases.append(("dup_toplevel", '{"a":1,"a":2}'))                # reject
     cases.append(("dup_nested", '{"x":{"b":1,"b":2}}'))            # reject
@@ -103,7 +159,7 @@ def main() -> int:
     cases = build_cases()
     divergent = []
     for name, text in cases:
-        payload = text.encode("utf-8")
+        payload = text.encode("utf-8") if isinstance(text, str) else text
         results = {L: run_cli(L, payload) for L in LINEAGES}
         accepts = {L for L, (rc, _) in results.items() if rc == 0}
         if accepts and accepts != set(LINEAGES):
