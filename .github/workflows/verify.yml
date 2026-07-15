@@ -1,0 +1,140 @@
+# BAION STD cross-lineage verification — CI Gate.
+# Builds all seven lineages from a fresh checkout, runs each lineage's own
+# test suite, then runs verify_all_lineages.sh against the seven compiled
+# CLIs together. The verify job is the claim: byte-identical canonical JSON
+# + SHA-256 across C, C++, Rust, Go, D, Haskell, OCaml.
+name: verify
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+
+jobs:
+  build:
+    name: build (${{ matrix.lineage }})
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        lineage: [c, cpp, rust, go, d, haskell, ocaml]
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up Go
+        if: matrix.lineage == 'go'
+        uses: actions/setup-go@v5
+        with:
+          go-version: '1.22'
+          cache-dependency-path: go/go.mod
+
+      - name: Set up Rust
+        if: matrix.lineage == 'rust'
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Set up D
+        if: matrix.lineage == 'd'
+        uses: dlang-community/setup-dlang@v2
+        with:
+          compiler: dmd-latest
+
+      - name: Set up Haskell
+        if: matrix.lineage == 'haskell'
+        uses: haskell-actions/setup@v2
+        with:
+          ghc-version: '9.6'
+          cabal-version: 'latest'
+
+      - name: Set up OCaml
+        if: matrix.lineage == 'ocaml'
+        uses: ocaml/setup-ocaml@v3
+        with:
+          ocaml-compiler: '5.2'
+
+      - name: Build and test C
+        if: matrix.lineage == 'c'
+        run: make -C c build && make -C c test
+
+      - name: Build and test C++
+        if: matrix.lineage == 'cpp'
+        run: |
+          cmake -S cpp -B cpp/build
+          cmake --build cpp/build
+          ctest --test-dir cpp/build --output-on-failure
+
+      - name: Build and test Rust
+        if: matrix.lineage == 'rust'
+        working-directory: rust
+        run: |
+          cargo build --release
+          cargo test --release
+          mkdir -p bin
+          cp target/release/baion_canon_hash bin/baion_canon_hash
+
+      - name: Build and test Go
+        if: matrix.lineage == 'go'
+        working-directory: go
+        run: |
+          go build -o bin/baion_canon_hash ./cmd/baion_canon_hash
+          go test ./...
+
+      - name: Build and test D
+        if: matrix.lineage == 'd'
+        working-directory: d
+        run: |
+          dub build --config=cli
+          dub build --config=unittest && ./bin/baionstd-canon-test
+
+      - name: Build and test Haskell
+        if: matrix.lineage == 'haskell'
+        working-directory: haskell
+        run: |
+          cabal update
+          cabal build all
+          cabal test all --test-show-details=direct
+          mkdir -p bin
+          cp "$(cabal list-bin baion-canon-hash)" bin/baion_canon_hash
+
+      - name: Build and test OCaml
+        if: matrix.lineage == 'ocaml'
+        working-directory: ocaml
+        run: |
+          opam install --yes dune yojson digestif alcotest
+          make build test
+
+      # Sanity: the CLI the verify job will receive must exist and answer.
+      - name: Smoke the CLI
+        run: |
+          test -x "${{ matrix.lineage }}/bin/baion_canon_hash"
+          printf '%s' '{"b":1,"a":[1,2]}' | "${{ matrix.lineage }}/bin/baion_canon_hash"
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: cli-${{ matrix.lineage }}
+          path: ${{ matrix.lineage }}/bin/baion_canon_hash
+          if-no-files-found: error
+
+  verify:
+    name: verify 7/7 byte-identity
+    needs: build
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/download-artifact@v4
+        with:
+          pattern: cli-*
+
+      # download-artifact strips the execute bit and lands each artifact in
+      # cli-<lineage>/; restore the layout verify_all_lineages.sh expects.
+      - name: Place CLIs
+        run: |
+          for L in c cpp rust go d haskell ocaml; do
+            mkdir -p "$L/bin"
+            mv "cli-$L/baion_canon_hash" "$L/bin/baion_canon_hash"
+            chmod +x "$L/bin/baion_canon_hash"
+          done
+
+      - name: Run cross-lineage verifier
+        run: ./verify_all_lineages.sh

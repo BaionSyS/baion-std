@@ -1,5 +1,7 @@
 # BAION STD — Cross-Lineage Canonical JSON + SHA-256
 
+[![verify](https://github.com/BaionSyS/baion-std/actions/workflows/verify.yml/badge.svg?branch=main)](https://github.com/BaionSyS/baion-std/actions/workflows/verify.yml)
+
 Seven independent implementations of the same canonicalization contract — C, C++, Rust, Go, D, Haskell, and OCaml — that produce **byte-identical canonical JSON and identical SHA-256 digests** for the supported JSON domain, enforced by shared conformance vectors and cross-lineage tests. Not "semantically equivalent." Identical bytes, identical hashes, every lineage.
 
 ```
