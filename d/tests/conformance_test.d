@@ -384,3 +384,170 @@ unittest
     assert(scanSingleDocument(`{"a":1,"b":[1,2]}`).isNull,
             "single-document FAILED: legitimate commas wrongly flagged");
 }
+
+// ── Inter-token control-byte scan tests ──
+// Only 0x09/0x0A/0x0D/0x20 may separate tokens (RFC 8259 §2); std.json's
+// isWhite-based skip also accepts 0x0B/0x0C, so the raw scan must catch
+// them. Raw control bytes are built with \xNN escapes — never literal
+// control bytes in this source file.
+unittest
+{
+    // Vertical tab / form feed between tokens — the differential-probe bug
+    assert(hasUnsupportedControl("{\"a\":1,\x0B\"b\":2}"),
+            "control-scan FAILED: vertical tab between tokens not flagged");
+    assert(hasUnsupportedControl("{\"a\":1,\x0C\"b\":2}"),
+            "control-scan FAILED: form feed between tokens not flagged");
+
+    // Other control bytes: leading, trailing, and interior positions
+    assert(hasUnsupportedControl("\x0B{\"a\":1}"),
+            "control-scan FAILED: leading vertical tab not flagged");
+    assert(hasUnsupportedControl("{\"a\":1}\x0C"),
+            "control-scan FAILED: trailing form feed not flagged");
+    assert(hasUnsupportedControl("{\"a\":\x021}"),
+            "control-scan FAILED: STX between tokens not flagged");
+    assert(hasUnsupportedControl("[1,\x1F2]"),
+            "control-scan FAILED: 0x1F between tokens not flagged");
+    assert(hasUnsupportedControl("\x00"),
+            "control-scan FAILED: bare NUL not flagged");
+
+    // Legal RFC 8259 whitespace must pass untouched
+    assert(!hasUnsupportedControl("\t\r\n {\"a\":\t1} \r\n"),
+            "control-scan FAILED: legal whitespace wrongly flagged");
+
+    // Escaped controls inside strings are TEXT, not raw bytes — pass
+    assert(!hasUnsupportedControl("{\"s\":\"abc\\nd\"}"),
+            "control-scan FAILED: escaped in-string controls wrongly flagged");
+
+    // Whitespace-looking bytes inside string literals belong to the
+    // string (parseJSON polices raw in-string controls) — the scan must
+    // consume literals whole, not flag their contents
+    assert(!hasUnsupportedControl("{\"s\":\"a b\"}"),
+            "control-scan FAILED: space inside string wrongly flagged");
+}
+
+// ── Raw UTF-8 scan tests ──
+// RFC 3629 well-formedness on the raw bytes: parseJSON passes invalid
+// UTF-8 through untouched, so the raw scan must reject it first. All
+// non-ASCII payload bytes are built with \xNN escapes — never raw
+// bytes in this source file.
+unittest
+{
+    alias b = (string s) => cast(const(ubyte)[]) s;
+
+    // The agreement-fuzzer counterexamples
+    assert(hasInvalidUTF8(b("{\"\xe0a\":[]}")),
+            "utf8-scan FAILED: truncated 3-byte lead in key not flagged");
+    assert(hasInvalidUTF8(b("\"a\x85b\"")),
+            "utf8-scan FAILED: stray continuation byte not flagged");
+
+    // Truncated sequences (lead byte with too few continuations)
+    assert(hasInvalidUTF8(b("\"\xc3\"")),
+            "utf8-scan FAILED: truncated 2-byte sequence not flagged");
+    assert(hasInvalidUTF8(b("\"\xe2\x82\"")),
+            "utf8-scan FAILED: truncated 3-byte sequence not flagged");
+    assert(hasInvalidUTF8(b("\xf0\x9f\x98")),
+            "utf8-scan FAILED: truncated 4-byte sequence at EOF not flagged");
+
+    // Overlong encodings
+    assert(hasInvalidUTF8(b("\"\xc0\xaf\"")),
+            "utf8-scan FAILED: overlong 0xC0 not flagged");
+    assert(hasInvalidUTF8(b("\"\xc1\x81\"")),
+            "utf8-scan FAILED: overlong 0xC1 not flagged");
+    assert(hasInvalidUTF8(b("\"\xe0\x80\xa0\"")),
+            "utf8-scan FAILED: overlong 0xE0 0x80 not flagged");
+    assert(hasInvalidUTF8(b("\"\xe0\x9f\xbf\"")),
+            "utf8-scan FAILED: overlong 0xE0 0x9F not flagged");
+    assert(hasInvalidUTF8(b("\"\xf0\x8f\xbf\xbf\"")),
+            "utf8-scan FAILED: overlong 0xF0 0x8F not flagged");
+
+    // Encoded UTF-16 surrogates
+    assert(hasInvalidUTF8(b("\"\xed\xa0\x80\"")),
+            "utf8-scan FAILED: encoded high surrogate not flagged");
+    assert(hasInvalidUTF8(b("\"\xed\xbf\xbf\"")),
+            "utf8-scan FAILED: encoded low surrogate not flagged");
+
+    // Above U+10FFFF
+    assert(hasInvalidUTF8(b("\"\xf4\x90\x80\x80\"")),
+            "utf8-scan FAILED: 0xF4 0x90 (above U+10FFFF) not flagged");
+    assert(hasInvalidUTF8(b("\"\xf5\x80\x80\x80\"")),
+            "utf8-scan FAILED: 0xF5 lead byte not flagged");
+    assert(hasInvalidUTF8(b("\"\xff\"")),
+            "utf8-scan FAILED: 0xFF byte not flagged");
+
+    // Bare continuation as first byte of input
+    assert(hasInvalidUTF8(b("\x80")),
+            "utf8-scan FAILED: leading stray continuation not flagged");
+
+    // Well-formed input must pass, including range boundaries
+    assert(!hasInvalidUTF8(b(`{"a":1,"s":"plain ascii"}`)),
+            "utf8-scan FAILED: ASCII wrongly flagged");
+    assert(!hasInvalidUTF8(b("\"\xc3\xa9\"")),
+            "utf8-scan FAILED: 2-byte e-acute wrongly flagged");
+    assert(!hasInvalidUTF8(b("\"\xe2\x82\xac\"")),
+            "utf8-scan FAILED: 3-byte euro sign wrongly flagged");
+    assert(!hasInvalidUTF8(b("\"\xf0\x9f\x98\x80\"")),
+            "utf8-scan FAILED: 4-byte emoji wrongly flagged");
+    assert(!hasInvalidUTF8(b("\"\xed\x9f\xbf\"")),
+            "utf8-scan FAILED: U+D7FF (below surrogates) wrongly flagged");
+    assert(!hasInvalidUTF8(b("\"\xee\x80\x80\"")),
+            "utf8-scan FAILED: U+E000 (above surrogates) wrongly flagged");
+    assert(!hasInvalidUTF8(b("\"\xf4\x8f\xbf\xbf\"")),
+            "utf8-scan FAILED: U+10FFFF (top of range) wrongly flagged");
+}
+
+// ── Strict token-lexeme scan tests ──
+// RFC 8259 number grammar (no leading zeros, no attached junk) and
+// exact-spelling literals: parseJSON accepts all of these laxly, so
+// the raw scan must reject them.
+unittest
+{
+    import baionstd.types : StdError;
+
+    // Leading-zero numbers — the agreement-fuzzer counterexamples
+    assert(scanStrictTokens(`0635`).get == StdError.invalidNumber,
+            "strict-token FAILED: 0635 not flagged");
+    assert(scanStrictTokens(`-004`).get == StdError.invalidNumber,
+            "strict-token FAILED: -004 not flagged");
+    assert(scanStrictTokens(`01`).get == StdError.invalidNumber,
+            "strict-token FAILED: 01 not flagged");
+    assert(scanStrictTokens(`03000000000000004`).get == StdError.invalidNumber,
+            "strict-token FAILED: 03000000000000004 not flagged");
+    assert(scanStrictTokens(`{"a":01}`).get == StdError.invalidNumber,
+            "strict-token FAILED: nested leading zero not flagged");
+
+    // Junk attached to a bare number
+    assert(scanStrictTokens(`2-`).get == StdError.invalidNumber,
+            "strict-token FAILED: 2- not flagged");
+    assert(scanStrictTokens(`1-`).get == StdError.invalidNumber,
+            "strict-token FAILED: 1- not flagged");
+    assert(scanStrictTokens(`77-7957`).get == StdError.invalidNumber,
+            "strict-token FAILED: 77-7957 not flagged");
+    assert(scanStrictTokens(`[1, 2-]`).get == StdError.invalidNumber,
+            "strict-token FAILED: nested attached junk not flagged");
+
+    // Case-variant literals
+    assert(scanStrictTokens(`nuLl`).get == StdError.invalidLiteral,
+            "strict-token FAILED: nuLl not flagged");
+    assert(scanStrictTokens(`falSe`).get == StdError.invalidLiteral,
+            "strict-token FAILED: falSe not flagged");
+    assert(scanStrictTokens(`tRue`).get == StdError.invalidLiteral,
+            "strict-token FAILED: tRue not flagged");
+    assert(scanStrictTokens(`{"a":[TRUE]}`).get == StdError.invalidLiteral,
+            "strict-token FAILED: nested TRUE not flagged");
+
+    // Legal tokens must pass untouched
+    assert(scanStrictTokens(`0`).isNull,
+            "strict-token FAILED: bare 0 wrongly flagged");
+    assert(scanStrictTokens(`-0.001`).isNull,
+            "strict-token FAILED: -0.001 wrongly flagged");
+    assert(scanStrictTokens(`10`).isNull,
+            "strict-token FAILED: 10 wrongly flagged");
+    assert(scanStrictTokens(`{"a":0.5,"b":[null,true,false]}`).isNull,
+            "strict-token FAILED: legal document wrongly flagged");
+    // Exponent forms are grammar-valid HERE (domain scan owns them)
+    assert(scanStrictTokens(`1e21`).isNull,
+            "strict-token FAILED: exponent form flagged by the wrong scanner");
+    // Digits and keyword-looking text inside strings are not tokens
+    assert(scanStrictTokens(`{"s":"0635 nuLl 2-"}`).isNull,
+            "strict-token FAILED: in-string text wrongly flagged");
+}

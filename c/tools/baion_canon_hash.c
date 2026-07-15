@@ -64,6 +64,17 @@ int main(void)
         return 1;
     }
 
+    /* Pre-parse UTF-8 well-formedness rejection (library-level scan): cJSON
+       copies string bytes through unexamined, so invalid byte sequences the
+       sibling lineages reject at decode time would hash here. Reviewer
+       contract: reject with exit 1. */
+    if (baion_reject_invalid_utf8(input, len) != BAION_OK)
+    {
+        fprintf(stderr, "baion_canon_hash: invalid UTF-8 byte sequence in input\n");
+        free(input);
+        return 1;
+    }
+
     /* Pre-parse U+0000 rejection (library-level scan): cJSON decodes the
        u0000 escape into a NUL byte that truncates the C string, so distinct
        documents would collapse onto one canonical form. Reviewer contract:
@@ -71,6 +82,37 @@ int main(void)
     if (baion_reject_u0000(input, len) != BAION_OK)
     {
         fprintf(stderr, "baion_canon_hash: U+0000 in input is unsupported\n");
+        free(input);
+        return 1;
+    }
+
+    /* Pre-parse raw-control rejection (library-level LEXICAL scan): cJSON
+       accepts raw control bytes inside strings and skips non-whitespace
+       control bytes between tokens, both forbidden by RFC 8259 — the sibling
+       lineages reject them. Reviewer contract: reject with exit 1. */
+    if (baion_reject_raw_controls(input, len) != BAION_OK)
+    {
+        fprintf(stderr, "baion_canon_hash: raw control byte in input is unsupported\n");
+        free(input);
+        return 1;
+    }
+
+    /* Pre-parse escape-shape rejection (library-level LEXICAL scan): cJSON
+       tolerates some short backslash-u forms that the sibling lineages
+       reject. Reviewer contract: reject with exit 1. */
+    if (baion_reject_malformed_escapes(input, len) != BAION_OK)
+    {
+        fprintf(stderr, "baion_canon_hash: malformed string escape in input is invalid\n");
+        free(input);
+        return 1;
+    }
+
+    /* Pre-parse number-shape rejection (library-level LEXICAL scan): cJSON
+       accepts leading zeros and bare trailing dots that RFC 8259 forbids and
+       the sibling lineages reject. Reviewer contract: reject with exit 1. */
+    if (baion_reject_number_grammar(input, len) != BAION_OK)
+    {
+        fprintf(stderr, "baion_canon_hash: invalid number token shape in input\n");
         free(input);
         return 1;
     }

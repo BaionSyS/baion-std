@@ -29,6 +29,44 @@ int baion_reject_duplicate_keys(const cJSON* root);
  * being byte-distinct on the wire. */
 int baion_reject_bom(const char* input, size_t len);
 
+/* Pre-parse LEXICAL scan for raw control bytes: returns BAION_OK if the input
+ * carries no raw byte < 0x20 inside string literals and no raw byte < 0x20
+ * other than TAB/LF/CR between tokens, else BAION_ERR_PARSE. Must run BEFORE
+ * cJSON parsing — cJSON accepts raw controls inside strings and skips any
+ * byte <= 0x20 between tokens as whitespace, both of which RFC 8259 forbids,
+ * so C would otherwise accept documents the sibling lineages reject. Escaped
+ * forms (the backslash-t and backslash-u001F spellings) stay accepted: they
+ * are escape TEXT, not raw bytes, so this byte-level check cannot
+ * false-positive on them. */
+int baion_reject_raw_controls(const char* input, size_t len);
+
+/* Pre-parse scan of raw input bytes: returns BAION_OK if the whole byte
+ * stream is well-formed UTF-8 per RFC 3629, else BAION_ERR_PARSE. Rejects
+ * continuation bytes without a lead, truncated sequences, overlong encodings
+ * (0xC0/0xC1 leads, 0xE0 0x80-0x9F, 0xF0 0x80-0x8F), encoded surrogates
+ * (0xED 0xA0-0xBF), and values above U+10FFFF (0xF4 0x90+, 0xF5-0xFF leads).
+ * Must run BEFORE cJSON parsing — cJSON copies string bytes through
+ * unexamined, so C would otherwise hash byte streams the sibling lineages
+ * reject at decode time. */
+int baion_reject_invalid_utf8(const char* input, size_t len);
+
+/* Pre-parse LEXICAL scan of escape shape inside string literals: returns
+ * BAION_OK if every backslash is followed by one of the eight single-char
+ * escapes (quote, backslash, slash, b, f, n, r, t) or by 'u' + exactly 4 hex
+ * digits, else BAION_ERR_PARSE. Must run BEFORE cJSON parsing — cJSON's hex
+ * decoding tolerates some short backslash-u forms. Surrogate PAIRING validity
+ * is out of scope here; this scan judges lexical shape only. */
+int baion_reject_malformed_escapes(const char* input, size_t len);
+
+/* Pre-parse LEXICAL scan of RFC 8259 number token shape: returns BAION_OK if
+ * every number token is optional '-', then '0' or [1-9] digits (no leading
+ * zeros), then optional '.' followed by at least one digit (no bare trailing
+ * dot), else BAION_ERR_PARSE. Exponent text is not judged here — that
+ * verdict belongs to baion_reject_number_domain. Must run BEFORE cJSON
+ * parsing — cJSON accepts leading zeros and bare trailing dots that the
+ * sibling lineages reject. */
+int baion_reject_number_grammar(const char* input, size_t len);
+
 /* Pre-parse LEXICAL scan of raw JSON number tokens: returns BAION_OK if every
  * number token in the input is inside the plain-decimal domain, else
  * BAION_ERR_PARSE. Must run BEFORE cJSON parsing — cJSON collapses "100" and

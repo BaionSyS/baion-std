@@ -246,6 +246,141 @@ let test_literal_backslash_udc00_allowed () =
      even run pairs off into literal backslashes and must pass. *)
   Canonical_json.check_no_lone_surrogates {|{"s":"\\udc00"}|}
 
+(* Raw-control-byte enforcement is a LEXICAL pass over the raw text —
+   yojson accepts an unescaped 0x01-0x1F byte inside a string literal,
+   indistinguishable from the escaped spelling by parse time. The
+   payloads below use OCaml string escapes ("\t", "\x1e") in REGULAR
+   (non-{|...|}) strings, so the compiler emits the raw control byte
+   into the test input — never a literal control byte in this source
+   file. *)
+let test_raw_control_in_string_rejected () =
+  Alcotest.check_raises "raw TAB inside string literal rejected"
+    (Canonical_json.Control_char_rejected
+       "unsupported raw control character (0x09) in string literal")
+    (fun () -> Canonical_json.check_no_raw_control_chars "{\"s\":\"a\tb\"}");
+  Alcotest.check_raises "raw 0x1e inside string literal rejected"
+    (Canonical_json.Control_char_rejected
+       "unsupported raw control character (0x1e) in string literal")
+    (fun () -> Canonical_json.check_no_raw_control_chars "{\"s\":\"a\x1eb\"}");
+  (* A raw control byte immediately after a backslash is still inside
+     the literal and must not ride through on the escape's 2-byte skip. *)
+  Alcotest.check_raises "raw 0x01 behind a backslash rejected"
+    (Canonical_json.Control_char_rejected
+       "unsupported raw control character (0x01) in string literal")
+    (fun () ->
+      Canonical_json.check_no_raw_control_chars "{\"s\":\"a\\\x01b\"}")
+
+let test_raw_control_between_tokens_rejected () =
+  Alcotest.check_raises "raw 0x02 between tokens rejected"
+    (Canonical_json.Control_char_rejected
+       "unsupported raw control character (0x02) between tokens")
+    (fun () ->
+      Canonical_json.check_no_raw_control_chars "{\"a\":1,\x02\"b\":2}");
+  (* Form feed is a control byte, NOT legal JSON whitespace. *)
+  Alcotest.check_raises "raw form feed between tokens rejected"
+    (Canonical_json.Control_char_rejected
+       "unsupported raw control character (0x0c) between tokens")
+    (fun () -> Canonical_json.check_no_raw_control_chars "{\"a\":\x0c1}")
+
+let test_escaped_controls_and_legal_ws_allowed () =
+  (* Escaped forms stay ACCEPTED: backslash-t / backslash-u001f are
+     printable bytes in the raw text (the {|...|} raw-string literals
+     below contain a real backslash, no control byte). *)
+  Canonical_json.check_no_raw_control_chars {|{"s":"a\tb"}|};
+  Canonical_json.check_no_raw_control_chars "{\"s\":\"a\\u001fb\"}";
+  (* Legal insignificant whitespace between tokens: TAB/LF/CR/space. *)
+  Canonical_json.check_no_raw_control_chars "{\"a\":\t1}";
+  Canonical_json.check_no_raw_control_chars "\n{\"a\": 1}\r\n"
+
+(* UTF-8 well-formedness is a check on the RAW bytes — yojson passes
+   invalid sequences through string literals verbatim. Payloads below
+   use OCaml "\xNN" escapes in regular strings so the compiler emits
+   the raw bytes; this source file never contains a raw invalid byte. *)
+let test_invalid_utf8_rejected () =
+  let reject label input msg =
+    Alcotest.check_raises label (Canonical_json.Invalid_utf8 msg) (fun () ->
+        Canonical_json.check_utf8 input)
+  in
+  reject "stray continuation byte rejected" "\"a\x85b\""
+    "invalid UTF-8 (stray continuation byte) at byte offset 2";
+  reject "bare lead byte before ASCII rejected" "{\"\xe0a\":[]}"
+    "invalid UTF-8 (truncated sequence) at byte offset 3";
+  reject "truncated 2-byte sequence at end rejected" "\"\xc3\""
+    "invalid UTF-8 (truncated sequence) at byte offset 2";
+  reject "overlong 2-byte encoding (0xC0) rejected" "\"\xc0\xaf\""
+    "invalid UTF-8 (overlong encoding) at byte offset 1";
+  reject "overlong 2-byte encoding (0xC1) rejected" "\"\xc1\x81\""
+    "invalid UTF-8 (overlong encoding) at byte offset 1";
+  reject "overlong 3-byte encoding (0xE0 0x80) rejected" "\"\xe0\x80\x80\""
+    "invalid UTF-8 (overlong encoding) at byte offset 1";
+  reject "encoded surrogate (0xED 0xA0) rejected" "\"\xed\xa0\x80\""
+    "invalid UTF-8 (encoded surrogate) at byte offset 1";
+  reject "overlong 4-byte encoding (0xF0 0x80) rejected" "\"\xf0\x80\x80\x80\""
+    "invalid UTF-8 (overlong encoding) at byte offset 1";
+  reject "above U+10FFFF (0xF4 0x90) rejected" "\"\xf4\x90\x80\x80\""
+    "invalid UTF-8 (code point above U+10FFFF) at byte offset 1";
+  reject "0xF5 lead byte rejected" "\"\xf5\x80\x80\x80\""
+    "invalid UTF-8 (code point above U+10FFFF) at byte offset 1";
+  reject "0xFF lead byte rejected" "\"\xff\""
+    "invalid UTF-8 (code point above U+10FFFF) at byte offset 1"
+
+let test_valid_utf8_allowed () =
+  (* Well-formed multi-byte sequences must pass: 2-byte (U+00E9),
+     3-byte (U+20AC), 4-byte (U+1F600), and the boundary code points
+     U+E000 (first post-surrogate) and U+10FFFF (last scalar value). *)
+  Canonical_json.check_utf8 "{\"z\":1,\"a\":\"\xc3\xa9\"}";
+  Canonical_json.check_utf8 "{\"x\":\"\xe2\x82\xac\"}";
+  Canonical_json.check_utf8 "{\"x\":\"\xf0\x9f\x98\x80\"}";
+  Canonical_json.check_utf8 "\"\xee\x80\x80\"";
+  Canonical_json.check_utf8 "\"\xf4\x8f\xbf\xbf\"";
+  Canonical_json.check_utf8 "\"plain ascii\""
+
+(* Strict token grammar is a LEXICAL pass — yojson's Safe parser
+   accepts unquoted object keys, // and block comments, and the
+   NaN/Infinity literals, none of which survive to the parsed value. *)
+let test_unquoted_key_rejected () =
+  Alcotest.check_raises "unquoted object key rejected"
+    (Canonical_json.Nonstandard_token
+       "unsupported bare token (unquoted key or non-JSON literal): tz")
+    (fun () -> Canonical_json.check_strict_tokens {|{tz:true}|})
+
+let test_nonstandard_literals_rejected () =
+  let reject label input tok =
+    Alcotest.check_raises label
+      (Canonical_json.Nonstandard_token
+         ("unsupported bare token (unquoted key or non-JSON literal): " ^ tok))
+      (fun () -> Canonical_json.check_strict_tokens input)
+  in
+  reject "NaN literal rejected" {|{"x":NaN}|} "NaN";
+  reject "Infinity literal rejected" {|{"x":Infinity}|} "Infinity";
+  (* The '-' is consumed as an (empty-domain) number token; the
+     identifier that follows is what trips the scanner. *)
+  reject "-Infinity literal rejected" {|{"x":-Infinity}|} "Infinity";
+  reject "capitalized True rejected" {|True|} "True"
+
+let test_comment_syntax_rejected () =
+  Alcotest.check_raises "line comment rejected"
+    (Canonical_json.Nonstandard_token "unsupported comment syntax")
+    (fun () -> Canonical_json.check_strict_tokens "{\"a\":1 // c\n}");
+  Alcotest.check_raises "block comment rejected"
+    (Canonical_json.Nonstandard_token "unsupported comment syntax")
+    (fun () -> Canonical_json.check_strict_tokens {|{"a":/* c */1}|})
+
+let test_strict_tokens_legal_input_allowed () =
+  (* The three legal bare literals pass, standalone and as values. *)
+  Canonical_json.check_strict_tokens "true";
+  Canonical_json.check_strict_tokens "false";
+  Canonical_json.check_strict_tokens "null";
+  Canonical_json.check_strict_tokens {|{"a":true,"b":false,"c":null}|};
+  (* Letters, slashes, and NaN/Infinity spellings INSIDE string
+     literals are ordinary string content and must pass. *)
+  Canonical_json.check_strict_tokens {|{"s":"NaN and Infinity and // x"}|};
+  Canonical_json.check_strict_tokens {|{"url":"http://example.com/a"}|};
+  (* Number tokens are consumed opaquely: the 'e' in 1e2 must never be
+     misread as a bare identifier (the number pass owns that error). *)
+  Canonical_json.check_strict_tokens {|{"x":1e2}|};
+  Canonical_json.check_strict_tokens {|{"x":-1.5,"y":100}|}
+
 (* Shortest-roundtrip float formatting: 0.1 must canonicalize as "0.1",
    not the %.17g spelling "0.10000000000000001" (RFC 8785 §3.2.2.3 /
    ECMA-262 §7.1.12.1). *)
@@ -329,6 +464,33 @@ let () =
             test_surrogate_pair_allowed;
           Alcotest.test_case "literal backslash + udc00 text allowed" `Quick
             test_literal_backslash_udc00_allowed;
+        ] );
+      ( "raw_control_char_rejection",
+        [
+          Alcotest.test_case "raw control byte inside string rejected" `Quick
+            test_raw_control_in_string_rejected;
+          Alcotest.test_case "raw control byte between tokens rejected" `Quick
+            test_raw_control_between_tokens_rejected;
+          Alcotest.test_case "escaped controls and legal whitespace allowed"
+            `Quick test_escaped_controls_and_legal_ws_allowed;
+        ] );
+      ( "utf8_validation",
+        [
+          Alcotest.test_case "invalid UTF-8 byte sequences rejected" `Quick
+            test_invalid_utf8_rejected;
+          Alcotest.test_case "well-formed UTF-8 allowed" `Quick
+            test_valid_utf8_allowed;
+        ] );
+      ( "strict_token_grammar",
+        [
+          Alcotest.test_case "unquoted object key rejected" `Quick
+            test_unquoted_key_rejected;
+          Alcotest.test_case "NaN/Infinity/True literals rejected" `Quick
+            test_nonstandard_literals_rejected;
+          Alcotest.test_case "comment syntax rejected" `Quick
+            test_comment_syntax_rejected;
+          Alcotest.test_case "legal literals and string content allowed"
+            `Quick test_strict_tokens_legal_input_allowed;
         ] );
       ( "float_formatting",
         [

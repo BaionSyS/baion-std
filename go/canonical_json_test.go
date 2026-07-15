@@ -313,6 +313,56 @@ func TestCanonicalJSON_LoneSurrogateRejection(t *testing.T) {
 	}
 }
 
+// Invalid-UTF-8 contract: the raw input bytes must be well-formed UTF-8.
+// encoding/json alone would silently substitute U+FFFD for bad bytes and hash
+// input every sibling lineage rejects, so CheckValidUTF8 must catch every
+// invalid class on the raw bytes — including UTF-8-ENCODED surrogates (0xED
+// 0xA0 0x80), which utf8.Valid rejects via strict decoding (verified here so a
+// toolchain regression would be caught, not silently absorbed).
+// Payloads are built with []byte literals — never raw invalid bytes in source.
+func TestCanonicalJSON_InvalidUTF8Rejection(t *testing.T) {
+	rejects := []struct {
+		name  string
+		input []byte
+	}{
+		{"truncated_lead_in_key", append([]byte(`{"`), append([]byte{0xe0}, []byte(`a":[]}`)...)...)},
+		{"stray_continuation_in_string", []byte{'"', 'a', 0x85, 'b', '"'}},
+		{"overlong_slash", []byte{'"', 0xc0, 0xaf, '"'}},
+		{"encoded_surrogate_d800", []byte{'"', 0xed, 0xa0, 0x80, '"'}},
+		{"encoded_surrogate_dfff", []byte{'"', 0xed, 0xbf, 0xbf, '"'}},
+		{"truncated_two_byte_at_eof", []byte{'"', 0xc3, '"'}},
+		{"bare_ff", []byte{'"', 0xff, '"'}},
+		{"truncated_four_byte", []byte{'"', 0xf0, 0x9f, 0x98, '"'}},
+	}
+	for _, tt := range rejects {
+		t.Run("reject_"+tt.name, func(t *testing.T) {
+			if err := CheckValidUTF8(tt.input); err != ErrInvalidUTF8 {
+				t.Errorf("input % x: want ErrInvalidUTF8, got %v", tt.input, err)
+			}
+		})
+	}
+
+	accepts := []struct {
+		name  string
+		input []byte
+	}{
+		{"ascii", []byte(`{"a":1}`)},
+		{"two_byte_e_acute", []byte{'"', 0xc3, 0xa9, '"'}},
+		{"three_byte_euro", []byte{'"', 0xe2, 0x82, 0xac, '"'}},
+		{"four_byte_emoji", []byte{'"', 0xf0, 0x9f, 0x98, 0x80, '"'}},
+		{"just_below_surrogates_ud7ff", []byte{'"', 0xed, 0x9f, 0xbf, '"'}},
+		{"just_above_surrogates_ue000", []byte{'"', 0xee, 0x80, 0x80, '"'}},
+		{"empty", []byte{}},
+	}
+	for _, tt := range accepts {
+		t.Run("accept_"+tt.name, func(t *testing.T) {
+			if err := CheckValidUTF8(tt.input); err != nil {
+				t.Errorf("input % x: want nil, got %v", tt.input, err)
+			}
+		})
+	}
+}
+
 // Negative-zero contract: any zero value emits exactly "0" (RFC 8785 / ES
 // ToString) — both the fraction spelling -0.0 (float path) and the integer
 // spelling -0 (int64 path).

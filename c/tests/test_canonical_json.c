@@ -270,6 +270,171 @@ static void test_bom_rejection(void)
     ASSERT_INT_EQ(baion_reject_bom(interior, strlen(interior)), BAION_OK);
 }
 
+static void test_raw_control_rejection(void)
+{
+    /* Raw control byte INSIDE a string literal: RFC 8259 requires it to be
+     * escaped — cJSON alone would accept it. The "\t" / "\x1e" C escapes
+     * below put the raw byte in the runtime payload, never in this source. */
+    const char* raw_tab = "{\"s\":\"a\tb\"}";
+    ASSERT_INT_EQ(baion_reject_raw_controls(raw_tab, strlen(raw_tab)), BAION_ERR_PARSE);
+    const char* raw_rs = "{\"s\":\"a\x1e"
+                         "b\"}";
+    ASSERT_INT_EQ(baion_reject_raw_controls(raw_rs, strlen(raw_rs)), BAION_ERR_PARSE);
+    const char* raw_after_backslash = "{\"s\":\"\\\x01\"}";
+    ASSERT_INT_EQ(baion_reject_raw_controls(raw_after_backslash, strlen(raw_after_backslash)),
+                  BAION_ERR_PARSE);
+
+    /* Non-whitespace control byte BETWEEN tokens: cJSON's skip treats any
+     * byte <= 0x20 as whitespace, but only TAB/LF/CR/space are legal. */
+    const char* ctrl_between = "{\"a\":1,\x02\"b\":2}";
+    ASSERT_INT_EQ(baion_reject_raw_controls(ctrl_between, strlen(ctrl_between)), BAION_ERR_PARSE);
+
+    /* Legal JSON whitespace between tokens: allowed */
+    const char* tab_ws = "{\"a\":\t1}";
+    ASSERT_INT_EQ(baion_reject_raw_controls(tab_ws, strlen(tab_ws)), BAION_OK);
+    const char* crlf_ws = "\n{\"a\":1}\r\n";
+    ASSERT_INT_EQ(baion_reject_raw_controls(crlf_ws, strlen(crlf_ws)), BAION_OK);
+
+    /* Escaped forms are escape TEXT (bytes 0x5C 0x74 / 0x5C 'u' ...), not
+     * raw control bytes — must stay accepted, including behind an escaped
+     * quote that must not close the string. */
+    const char* esc_tab = "{\"s\":\"a\\tb\"}";
+    ASSERT_INT_EQ(baion_reject_raw_controls(esc_tab, strlen(esc_tab)), BAION_OK);
+    const char* esc_u001f = "{\"s\":\"\\u001f\"}";
+    ASSERT_INT_EQ(baion_reject_raw_controls(esc_u001f, strlen(esc_u001f)), BAION_OK);
+    const char* esc_quote_then_raw_ok = "{\"a\\\"b\":\"\\n\"}";
+    ASSERT_INT_EQ(baion_reject_raw_controls(esc_quote_then_raw_ok, strlen(esc_quote_then_raw_ok)),
+                  BAION_OK);
+
+    /* TAB is only whitespace OUTSIDE strings — a raw TAB after an escaped
+     * quote is still inside the string literal and must be rejected. */
+    const char* raw_tab_after_esc_quote = "{\"a\\\"\t\":1}";
+    ASSERT_INT_EQ(
+        baion_reject_raw_controls(raw_tab_after_esc_quote, strlen(raw_tab_after_esc_quote)),
+        BAION_ERR_PARSE);
+}
+
+static void test_invalid_utf8_rejection(void)
+{
+    /* All payloads spell high bytes with C \xNN escapes — never raw bytes in
+     * this source file. */
+
+    /* Lead byte followed by a non-continuation byte */
+    const char* bad_lead = "{\"\xe0"
+                           "a\":[]}";
+    ASSERT_INT_EQ(baion_reject_invalid_utf8(bad_lead, strlen(bad_lead)), BAION_ERR_PARSE);
+
+    /* Continuation byte without a lead */
+    const char* stray_cont = "\"a\x85"
+                             "b\"";
+    ASSERT_INT_EQ(baion_reject_invalid_utf8(stray_cont, strlen(stray_cont)), BAION_ERR_PARSE);
+
+    /* Overlong encodings: C0/C1 leads, E0 80-9F, F0 80-8F */
+    const char* overlong2 = "\"\xc0\xaf\"";
+    ASSERT_INT_EQ(baion_reject_invalid_utf8(overlong2, strlen(overlong2)), BAION_ERR_PARSE);
+    const char* overlong3 = "\"\xe0\x9f\xbf\"";
+    ASSERT_INT_EQ(baion_reject_invalid_utf8(overlong3, strlen(overlong3)), BAION_ERR_PARSE);
+    const char* overlong4 = "\"\xf0\x8f\xbf\xbf\"";
+    ASSERT_INT_EQ(baion_reject_invalid_utf8(overlong4, strlen(overlong4)), BAION_ERR_PARSE);
+
+    /* Encoded surrogate U+D800 (ED A0 80) */
+    const char* enc_surrogate = "\"\xed\xa0\x80\"";
+    ASSERT_INT_EQ(baion_reject_invalid_utf8(enc_surrogate, strlen(enc_surrogate)),
+                  BAION_ERR_PARSE);
+
+    /* Values above U+10FFFF: F4 90+ and F5-FF leads */
+    const char* above_max = "\"\xf4\x90\x80\x80\"";
+    ASSERT_INT_EQ(baion_reject_invalid_utf8(above_max, strlen(above_max)), BAION_ERR_PARSE);
+    const char* f5_lead = "\"\xf5\x80\x80\x80\"";
+    ASSERT_INT_EQ(baion_reject_invalid_utf8(f5_lead, strlen(f5_lead)), BAION_ERR_PARSE);
+
+    /* Truncated sequence at end of input */
+    const char* truncated = "\"\xc3";
+    ASSERT_INT_EQ(baion_reject_invalid_utf8(truncated, strlen(truncated)), BAION_ERR_PARSE);
+
+    /* Well-formed multi-byte content stays accepted: e-acute (C3 A9),
+     * boundary 3-byte forms (E0 A0 80, ED 9F BF), 4-byte emoji (F0 9F 98 80),
+     * top of the range (F4 8F BF BF). */
+    const char* e_acute = "{\"a\":\"\xc3\xa9\"}";
+    ASSERT_INT_EQ(baion_reject_invalid_utf8(e_acute, strlen(e_acute)), BAION_OK);
+    const char* boundary3 = "\"\xe0\xa0\x80 \xed\x9f\xbf\"";
+    ASSERT_INT_EQ(baion_reject_invalid_utf8(boundary3, strlen(boundary3)), BAION_OK);
+    const char* emoji = "{\"x\":\"\xf0\x9f\x98\x80\"}";
+    ASSERT_INT_EQ(baion_reject_invalid_utf8(emoji, strlen(emoji)), BAION_OK);
+    const char* top = "\"\xf4\x8f\xbf\xbf\"";
+    ASSERT_INT_EQ(baion_reject_invalid_utf8(top, strlen(top)), BAION_OK);
+}
+
+static void test_malformed_escape_rejection(void)
+{
+    /* Short backslash-u forms the fuzzer caught cJSON accepting */
+    const char* short_u = "\"\\u00es\"";
+    ASSERT_INT_EQ(baion_reject_malformed_escapes(short_u, strlen(short_u)), BAION_ERR_PARSE);
+    const char* short_u2 = "\"\\ud83\\ude00\"";
+    ASSERT_INT_EQ(baion_reject_malformed_escapes(short_u2, strlen(short_u2)), BAION_ERR_PARSE);
+    const char* trunc_u = "\"\\u12";
+    ASSERT_INT_EQ(baion_reject_malformed_escapes(trunc_u, strlen(trunc_u)), BAION_ERR_PARSE);
+
+    /* Backslash before a char outside the eight escapes / 'u' */
+    const char* bad_esc = "\"a\\qb\"";
+    ASSERT_INT_EQ(baion_reject_malformed_escapes(bad_esc, strlen(bad_esc)), BAION_ERR_PARSE);
+
+    /* All eight legal single-char escapes plus a full backslash-u escape */
+    const char* legal = "\"\\\" \\\\ \\/ \\b \\f \\n \\r \\t \\u001f\"";
+    ASSERT_INT_EQ(baion_reject_malformed_escapes(legal, strlen(legal)), BAION_OK);
+
+    /* Escaped quote must not close the string: the backslash-u after it is
+     * still inside the literal and still judged. */
+    const char* esc_quote_then_bad = "{\"a\\\"\\u12g\":1}";
+    ASSERT_INT_EQ(baion_reject_malformed_escapes(esc_quote_then_bad, strlen(esc_quote_then_bad)),
+                  BAION_ERR_PARSE);
+
+    /* Outside strings a backslash is not judged here (cJSON rejects it as a
+     * syntax error) — no false positive on structural text. */
+    const char* outside = "{\"a\":1}";
+    ASSERT_INT_EQ(baion_reject_malformed_escapes(outside, strlen(outside)), BAION_OK);
+}
+
+static void test_number_grammar_rejection(void)
+{
+    /* Leading zeros */
+    const char* lead_zero = "0635";
+    ASSERT_INT_EQ(baion_reject_number_grammar(lead_zero, strlen(lead_zero)), BAION_ERR_PARSE);
+    const char* lead_zero_neg = "-004";
+    ASSERT_INT_EQ(baion_reject_number_grammar(lead_zero_neg, strlen(lead_zero_neg)),
+                  BAION_ERR_PARSE);
+    const char* zero_one = "{\"k\":01}";
+    ASSERT_INT_EQ(baion_reject_number_grammar(zero_one, strlen(zero_one)), BAION_ERR_PARSE);
+    const char* zero_one_dot = "01.5";
+    ASSERT_INT_EQ(baion_reject_number_grammar(zero_one_dot, strlen(zero_one_dot)),
+                  BAION_ERR_PARSE);
+
+    /* Bare trailing dot */
+    const char* trail_dot = "{\"k\":0.}";
+    ASSERT_INT_EQ(baion_reject_number_grammar(trail_dot, strlen(trail_dot)), BAION_ERR_PARSE);
+    const char* trail_dot2 = "[1.]";
+    ASSERT_INT_EQ(baion_reject_number_grammar(trail_dot2, strlen(trail_dot2)), BAION_ERR_PARSE);
+
+    /* Bare minus / dot-first */
+    const char* bare_minus = "[-]";
+    ASSERT_INT_EQ(baion_reject_number_grammar(bare_minus, strlen(bare_minus)), BAION_ERR_PARSE);
+    const char* minus_dot = "-.5";
+    ASSERT_INT_EQ(baion_reject_number_grammar(minus_dot, strlen(minus_dot)), BAION_ERR_PARSE);
+
+    /* Legal shapes stay accepted, including bare 0, -0.0 and fractions */
+    const char* legal = "{\"a\":0,\"b\":-0.0,\"c\":0.5,\"d\":123,\"e\":-42,\"f\":0.000001}";
+    ASSERT_INT_EQ(baion_reject_number_grammar(legal, strlen(legal)), BAION_OK);
+
+    /* Exponent text is not judged here — the number-domain scan owns that
+     * verdict (and rejects it). */
+    const char* exp_tok = "1e2";
+    ASSERT_INT_EQ(baion_reject_number_grammar(exp_tok, strlen(exp_tok)), BAION_OK);
+
+    /* Digits inside string literals are not number tokens */
+    const char* in_string = "{\"s\":\"0635 and 0. here\"}";
+    ASSERT_INT_EQ(baion_reject_number_grammar(in_string, strlen(in_string)), BAION_OK);
+}
+
 int main(void)
 {
     printf("test_canonical_json:\n");
@@ -284,6 +449,10 @@ int main(void)
     RUN_TEST(test_float_shortest_roundtrip);
     RUN_TEST(test_number_domain_rejection);
     RUN_TEST(test_bom_rejection);
+    RUN_TEST(test_raw_control_rejection);
+    RUN_TEST(test_invalid_utf8_rejection);
+    RUN_TEST(test_malformed_escape_rejection);
+    RUN_TEST(test_number_grammar_rejection);
     TEST_SUMMARY();
     return _test_failed;
 }

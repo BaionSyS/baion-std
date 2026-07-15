@@ -519,6 +519,255 @@ private bool isJSONWhitespace(char c) @safe pure nothrow
     return c == ' ' || c == '\t' || c == '\n' || c == '\r';
 }
 
+// ── Inter-token control-byte enforcement scan ────────────────
+//
+// CROSS-LINEAGE CONTRACT: outside string literals only the four RFC
+// 8259 §2 whitespace bytes (0x09 TAB, 0x0A LF, 0x0D CR, 0x20 space)
+// may separate tokens. All 7 lineages reject any other byte below
+// 0x20 between tokens — the CLI exits 1 naming an unsupported
+// control character.
+//
+// WHY a raw-input scan: std.json's parseJSON delegates inter-token
+// skipping to isWhite (measured, dmd 2.112.0), which also accepts
+// 0x0B vertical tab and 0x0C form feed — so `{"a":1,\x0B"b":2}`
+// parses cleanly and the defect is invisible post-parse.
+//
+// Raw control bytes INSIDE string literals are NOT this scan's job:
+// parseJSON already rejects them ("Illegal control character",
+// measured dmd 2.112.0) before any raw scan runs, so string literals
+// are consumed whole here.
+//
+// Precondition: as with the other raw scanners, parseJSON has already
+// accepted the input, so every string literal is terminated.
+
+/// Scan raw JSON text for control bytes between tokens that are not
+/// JSON whitespace. Returns true if any such byte exists.
+bool hasUnsupportedControl(const(char)[] raw)
+{
+    size_t i = 0;
+    while (i < raw.length)
+    {
+        char c = raw[i];
+        if (c == '"')
+        {
+            // Control bytes inside string literals are parseJSON's
+            // jurisdiction (see header): consume the whole literal.
+            decodeJSONString(raw, i);
+            continue;
+        }
+        if (c < 0x20 && !isJSONWhitespace(c))
+            return true;
+        i++;
+    }
+    return false;
+}
+
+// ── Raw UTF-8 enforcement scan ───────────────────────────────
+//
+// CROSS-LINEAGE CONTRACT: the raw input bytes must be well-formed
+// RFC 3629 UTF-8. All 7 lineages reject stray continuation bytes,
+// truncated sequences, overlong encodings (0xC0/0xC1, 0xE0 0x80-0x9F,
+// 0xF0 0x80-0x8F), encoded surrogates (0xED 0xA0-0xBF) and codepoints
+// above U+10FFFF (0xF4 0x90+, 0xF5-0xFF) — the CLI exits 1 naming
+// invalid UTF-8.
+//
+// WHY a raw-input scan: std.json's parseJSON (measured, dmd 2.112.0)
+// passes non-ASCII bytes through untouched — `{"\xE0a":[]}` and a bare
+// `"a\x85b"` parse cleanly and the invalid bytes land in the canonical
+// output, diverging from the C++/Rust/Haskell lineages which reject.
+//
+// UNLIKE the other raw scanners this one has NO parseJSON precondition:
+// it runs FIRST, on the raw bytes, before any parse — the other
+// scanners (and decodeJSONString) may then assume valid UTF-8.
+
+/// Scan raw input bytes for RFC 3629 well-formedness violations.
+/// Returns true if any invalid UTF-8 sequence exists.
+bool hasInvalidUTF8(const(ubyte)[] raw) @safe pure nothrow
+{
+    size_t i = 0;
+    while (i < raw.length)
+    {
+        immutable ubyte b = raw[i];
+        if (b < 0x80)
+        {
+            i++;
+            continue;
+        }
+
+        // Sequence length and the RFC 3629 §4 tightened range of the
+        // SECOND byte — this is where overlong forms, surrogates and
+        // > U+10FFFF are excluded, not just the 0x80-0xBF shape.
+        size_t len;
+        ubyte lo2 = 0x80, hi2 = 0xBF;
+        if (b >= 0xC2 && b <= 0xDF)
+            len = 2;
+        else if (b == 0xE0)
+        {
+            len = 3;
+            lo2 = 0xA0; // 0x80-0x9F would be an overlong 2-byte value
+        }
+        else if (b >= 0xE1 && b <= 0xEC)
+            len = 3;
+        else if (b == 0xED)
+        {
+            len = 3;
+            hi2 = 0x9F; // 0xA0-0xBF would encode a UTF-16 surrogate
+        }
+        else if (b >= 0xEE && b <= 0xEF)
+            len = 3;
+        else if (b == 0xF0)
+        {
+            len = 4;
+            lo2 = 0x90; // 0x80-0x8F would be an overlong 3-byte value
+        }
+        else if (b >= 0xF1 && b <= 0xF3)
+            len = 4;
+        else if (b == 0xF4)
+        {
+            len = 4;
+            hi2 = 0x8F; // 0x90-0xBF would encode above U+10FFFF
+        }
+        else
+        {
+            // 0x80-0xBF stray continuation, 0xC0/0xC1 overlong leads,
+            // 0xF5-0xFF out-of-range leads.
+            return true;
+        }
+
+        if (i + len > raw.length)
+            return true; // truncated sequence
+        if (raw[i + 1] < lo2 || raw[i + 1] > hi2)
+            return true;
+        foreach (k; 2 .. len)
+        {
+            if (raw[i + k] < 0x80 || raw[i + k] > 0xBF)
+                return true;
+        }
+        i += len;
+    }
+    return false;
+}
+
+// ── Strict token-lexeme enforcement scan ─────────────────────
+//
+// CROSS-LINEAGE CONTRACT: number tokens must match the RFC 8259 §6
+// grammar exactly (int part is `0` or [1-9] digits — no leading zeros,
+// no junk bytes attached to the token), and literal tokens must be
+// exactly `null`, `true`, `false` — never case variants. All 7
+// lineages reject `0635`, `-004`, `2-`, `77-7957`, `nuLl`, `falSe`,
+// `tRue` — the CLI exits 1 naming the invalid token.
+//
+// WHY a raw-input scan: std.json's parseJSON (measured, dmd 2.112.0)
+// accepts leading-zero integers, hashes `2-` / `77-7957` as the
+// leading number while silently dropping the tail, and matches the
+// null/true/false keywords CASE-INSENSITIVELY — post-parse none of
+// this lexical evidence survives. scanSingleDocument cannot catch the
+// attached-junk shape either: its greedy number sweep (matching
+// parseJSON's own lexer) swallows `-` bytes into the token, so the
+// junk never surfaces as trailing data — malformed number lexemes are
+// THIS scanner's jurisdiction.
+//
+// Precondition: hasInvalidUTF8 has already accepted the bytes;
+// parseJSON has already accepted the input (lexeme laxities above
+// notwithstanding), so string literals are terminated.
+
+/// Scan raw JSON text for number tokens violating the RFC 8259 grammar
+/// and for literal tokens that are not exactly null/true/false.
+/// Returns the violation, or a null Nullable when every token is clean.
+Nullable!StdError scanStrictTokens(const(char)[] raw)
+{
+    Nullable!StdError err;
+
+    size_t i = 0;
+    while (i < raw.length)
+    {
+        immutable char c = raw[i];
+        if (c == '"')
+        {
+            // Digits/letters inside string literals are not tokens:
+            // consume the whole literal (decoded text is discarded).
+            decodeJSONString(raw, i);
+            continue;
+        }
+        if (c == '-' || (c >= '0' && c <= '9'))
+        {
+            // Greedy sweep over the number alphabet — the same lexer view
+            // parseJSON takes, so junk it silently attached (`2-`) lands
+            // inside the token and fails the grammar check below.
+            immutable size_t start = i;
+            while (i < raw.length && (raw[i] == '-' || raw[i] == '+'
+                    || raw[i] == '.' || raw[i] == 'e' || raw[i] == 'E'
+                    || (raw[i] >= '0' && raw[i] <= '9')))
+                i++;
+            if (!numberTokenGrammarValid(raw[start .. i]))
+            {
+                err = StdError.invalidNumber;
+                return err;
+            }
+            continue;
+        }
+        if ((c >= 'a' && c <= 'z') || (c >= 'A' && c <= 'Z'))
+        {
+            // Literal token: sweep the alphabetic run and demand an exact
+            // keyword. 'e'/'E' inside numbers never reach here — the
+            // number sweep above owns them.
+            immutable size_t start = i;
+            while (i < raw.length && ((raw[i] >= 'a' && raw[i] <= 'z')
+                    || (raw[i] >= 'A' && raw[i] <= 'Z')))
+                i++;
+            const tok = raw[start .. i];
+            if (tok != "null" && tok != "true" && tok != "false")
+            {
+                err = StdError.invalidLiteral;
+                return err;
+            }
+            continue;
+        }
+        i++;
+    }
+    return err;
+}
+
+/// Check one raw number token against the RFC 8259 §6 grammar:
+/// -?(0|[1-9][0-9]*)(\.[0-9]+)?([eE][+-]?[0-9]+)?
+/// (Exponent forms are grammar-VALID here; hasUnsupportedNumber owns
+/// the domain rejection of exponents and out-of-range magnitudes.)
+private bool numberTokenGrammarValid(const(char)[] tok) @safe pure nothrow
+{
+    size_t i = 0;
+    if (i < tok.length && tok[i] == '-')
+        i++;
+    // int part: `0` alone, or a nonzero digit then any digits — a `0`
+    // followed by another digit is the leading-zero shape RFC 8259 forbids.
+    if (i >= tok.length || tok[i] < '0' || tok[i] > '9')
+        return false;
+    if (tok[i] == '0')
+        i++;
+    else
+        while (i < tok.length && tok[i] >= '0' && tok[i] <= '9')
+            i++;
+    if (i < tok.length && tok[i] == '.')
+    {
+        i++;
+        if (i >= tok.length || tok[i] < '0' || tok[i] > '9')
+            return false;
+        while (i < tok.length && tok[i] >= '0' && tok[i] <= '9')
+            i++;
+    }
+    if (i < tok.length && (tok[i] == 'e' || tok[i] == 'E'))
+    {
+        i++;
+        if (i < tok.length && (tok[i] == '+' || tok[i] == '-'))
+            i++;
+        if (i >= tok.length || tok[i] < '0' || tok[i] > '9')
+            return false;
+        while (i < tok.length && tok[i] >= '0' && tok[i] <= '9')
+            i++;
+    }
+    // Any leftover byte is junk parseJSON attached to the token (`2-`).
+    return i == tok.length;
+}
+
 /// Decode one JSON string literal starting at the opening quote.
 /// Advances `i` past the closing quote; returns the decoded text.
 /// WHY decode at all: key comparison must match the parser's view,

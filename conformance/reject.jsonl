@@ -17,3 +17,15 @@
 {"name": "two_documents", "input": "{\"a\":1}{\"b\":2}", "reason": "input must be exactly one JSON document"}
 {"name": "trailing_comma", "input": "{\"a\":1,}", "reason": "not valid RFC 8259 JSON"}
 {"name": "empty_input", "input": "", "reason": "input must be exactly one JSON document"}
+{"name": "raw_tab_in_string", "input": "{\"s\":\"a\tb\"}", "reason": "RFC 8259 requires control characters in strings to be escaped; three lineages accepted raw TAB"}
+{"name": "raw_ctrl_1e_in_string", "input": "\"tr\u001eR\"", "reason": "raw control byte inside string literal; escape it"}
+{"name": "raw_lf_in_string", "input": "{\"s\":\"a\nb\"}", "reason": "raw newline inside string literal; spell it as an escape"}
+{"name": "ctrl_between_tokens", "input": "{\"a\":1,\u0002\"b\":2}", "reason": "only TAB/LF/CR/space are JSON whitespace; one lineage skipped any byte <= 0x20"}
+{"name": "leading_zero_int", "input": "0635", "reason": "RFC 8259 int part is 0 or [1-9]digits; two lineages accepted"}
+{"name": "neg_leading_zero_int", "input": "-004", "reason": "RFC 8259 int part is 0 or [1-9]digits"}
+{"name": "trailing_dot_number", "input": "{\"k\":0.}", "reason": "fraction part requires at least one digit"}
+{"name": "number_trailing_junk", "input": "2-", "reason": "trailing bytes after a bare number token"}
+{"name": "case_insensitive_literal", "input": "nuLl", "reason": "literals must be spelled exactly null/true/false"}
+{"name": "unquoted_key", "input": "{tz:true}", "reason": "object member names must be quoted strings"}
+{"name": "short_u_escape", "input": "\"\\u00es\"", "reason": "backslash-u requires exactly 4 hex digits"}
+{"name": "unknown_escape", "input": "\"a\\qb\"", "reason": "only the eight RFC 8259 escapes plus u are legal"}

@@ -50,6 +50,9 @@ ACCEPT = [
     ("deep_nest_60", ('{"a":' * 60) + "1" + ("}" * 60)),
     ("same_key_sibling_objects", '[{"k":1},{"k":2}]'),
     ("micro_boundary", '{"x":0.000001}'),
+    # Pins ES-262 shortest-digits for an integer-valued double beyond 2^53:
+    # exact value is ...776 but the canonical spelling is the 16-digit ...780.
+    ("big_float_shortest_digits", '{"x":65219416364867774.9377591}'),
 ]
 
 # Uniform-rejection contract. reason is documentation for humans + remediation maps.
@@ -73,7 +76,26 @@ REJECT = [
     ("two_documents", '{"a":1}{"b":2}', "input must be exactly one JSON document"),
     ("trailing_comma", '{"a":1,}', "not valid RFC 8259 JSON"),
     ("empty_input", "", "input must be exactly one JSON document"),
+    ("raw_tab_in_string", '{"s":"a' + chr(0x09) + 'b"}',
+     "RFC 8259 requires control characters in strings to be escaped; three lineages accepted raw TAB"),
+    ("raw_ctrl_1e_in_string", '"tr' + chr(0x1E) + 'R"',
+     "raw control byte inside string literal; escape it"),
+    ("raw_lf_in_string", '{"s":"a' + chr(0x0A) + 'b"}',
+     "raw newline inside string literal; spell it as an escape"),
+    ("ctrl_between_tokens", '{"a":1,' + chr(0x02) + '"b":2}',
+     "only TAB/LF/CR/space are JSON whitespace; one lineage skipped any byte <= 0x20"),
+    ("leading_zero_int", "0635", "RFC 8259 int part is 0 or [1-9]digits; two lineages accepted"),
+    ("neg_leading_zero_int", "-004", "RFC 8259 int part is 0 or [1-9]digits"),
+    ("trailing_dot_number", '{"k":0.}', "fraction part requires at least one digit"),
+    ("number_trailing_junk", "2-", "trailing bytes after a bare number token"),
+    ("case_insensitive_literal", "nuLl", "literals must be spelled exactly null/true/false"),
+    ("unquoted_key", "{tz:true}", "object member names must be quoted strings"),
+    ("short_u_escape", '"' + BS + 'u00es"', "backslash-u requires exactly 4 hex digits"),
+    ("unknown_escape", '"a' + BS + 'qb"', "only the eight RFC 8259 escapes plus u are legal"),
 ]
+# NOTE: invalid-UTF-8 rejection (the fuzzer's largest class) cannot be pinned here —
+# the corpus input field is a JSON string, which cannot carry invalid byte sequences.
+# That class is covered by differential_probe.py (raw-bytes cases) and the fuzzer.
 
 
 def run_cli(lineage: str, payload: bytes):
