@@ -1,0 +1,3 @@
+(library
+ (name baionstd_public)
+ (libraries yojson digestif))

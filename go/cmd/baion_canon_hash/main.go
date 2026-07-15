@@ -1,0 +1,49 @@
+// BAION canonical JSON for Go — canon hash CLI.
+// Canonical JSON + SHA-256 over the canonical bytes.
+//
+// Reads UTF-8 JSON on stdin, canonicalizes it (keys sorted lexicographically
+// at every nesting level, no whitespace, minimal escaping), and prints the
+// lowercase-hex SHA-256 of the canonical bytes followed by a newline.
+// Exit 0 on success; nonzero on parse error.
+package main
+
+import (
+	"bytes"
+	"crypto/sha256"
+	"encoding/hex"
+	"encoding/json"
+	"fmt"
+	"io"
+	"os"
+
+	baionstd "baion.dev/std-go"
+)
+
+func main() {
+	input, err := io.ReadAll(os.Stdin)
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "baion_canon_hash: read stdin: %v\n", err)
+		os.Exit(1)
+	}
+
+	// json.Number preserves number spelling so canonicalization — not the
+	// decoder's float64 round-trip — decides the canonical numeric form.
+	dec := json.NewDecoder(bytes.NewReader(input))
+	dec.UseNumber()
+
+	var v interface{}
+	if err := dec.Decode(&v); err != nil {
+		fmt.Fprintf(os.Stderr, "baion_canon_hash: parse error: %v\n", err)
+		os.Exit(1)
+	}
+	// A second successful token means trailing garbage after the JSON value —
+	// reject rather than silently hashing a prefix of the input.
+	if _, err := dec.Token(); err != io.EOF {
+		fmt.Fprintln(os.Stderr, "baion_canon_hash: parse error: trailing data after JSON value")
+		os.Exit(1)
+	}
+
+	canonical := baionstd.CanonicalizeJSON(v)
+	sum := sha256.Sum256([]byte(canonical))
+	fmt.Println(hex.EncodeToString(sum[:]))
+}

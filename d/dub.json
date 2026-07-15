@@ -1,0 +1,25 @@
+{
+    "name": "baionstd-canon",
+    "description": "BAION canonical JSON + SHA-256 library and CLI (D lineage)",
+    "targetType": "executable",
+    "targetName": "baion_canon_hash",
+    "targetPath": "bin",
+    "sourcePaths": ["source"],
+    "importPaths": ["source"],
+    "configurations": [
+        {
+            "name": "cli",
+            "targetType": "executable",
+            "mainSourceFile": "tools/canon_hash_main.d"
+        },
+        {
+            "name": "unittest",
+            "targetType": "executable",
+            "targetName": "baionstd-canon-test",
+            "targetPath": "bin",
+            "mainSourceFile": "tests/runner.d",
+            "sourcePaths": ["source", "tests"],
+            "importPaths": ["source", "tests"]
+        }
+    ]
+}

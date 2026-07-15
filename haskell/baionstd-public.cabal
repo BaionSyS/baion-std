@@ -1,0 +1,55 @@
+cabal-version:      3.0
+name:               baionstd-public
+version:            0.3.0
+synopsis:           BAION canonical JSON + SHA-256 (Haskell)
+license:            NONE
+build-type:         Simple
+
+library
+  exposed-modules:
+    Baion.STD
+    Baion.STD.Hash
+    Baion.STD.CanonicalJson
+  build-depends:
+    base             >= 4.17 && < 5,
+    aeson            >= 2.0,
+    bytestring       >= 0.11,
+    text             >= 2.0,
+    crypton,
+    memory,
+    containers       >= 0.6,
+    vector           >= 0.13,
+    scientific       >= 0.3
+  hs-source-dirs:   src
+  default-language:  Haskell2010
+  ghc-options:       -Wall -O
+
+executable baion-canon-hash
+  main-is:           Main.hs
+  build-depends:
+    base,
+    baionstd-public,
+    aeson,
+    bytestring,
+    text
+  hs-source-dirs:   app
+  default-language:  Haskell2010
+  ghc-options:       -Wall -O
+
+test-suite baionstd-public-tests
+  type:              exitcode-stdio-1.0
+  main-is:           Main.hs
+  other-modules:
+    ConformanceTest
+  build-depends:
+    base,
+    baionstd-public,
+    aeson,
+    bytestring,
+    text,
+    tasty,
+    tasty-hunit,
+    directory
+  hs-source-dirs:   test
+  default-language:  Haskell2010
+  ghc-options:       -Wall -threaded

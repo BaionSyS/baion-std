@@ -1,0 +1,3 @@
+_build/
+*.install
+bin/baion_canon_hash

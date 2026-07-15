@@ -1,0 +1,64 @@
+{
+    "_comment": "BAION STD Cross-Lineage Conformance Fixtures. All lineage implementations must produce byte-identical canonical JSON and identical SHA-256 output for these inputs. DO NOT EDIT without updating all lineage test suites.",
+    "reference_document": {
+        "record_id": "2f6a1c9e-8d43-4b1a-9e2f-7c5d3a8b1f04",
+        "created": "2026-03-13T10:30:00.000Z",
+        "warehouse": {
+            "city": "Raleigh",
+            "bays": 12,
+            "active": true,
+            "notes": null
+        },
+        "items": [
+            {
+                "sku": "AX-1001",
+                "qty": 40,
+                "tags": [
+                    "cold",
+                    "fragile"
+                ]
+            },
+            {
+                "sku": "BZ-2002",
+                "qty": 0,
+                "tags": []
+            }
+        ],
+        "audit": {}
+    },
+    "reference_document_canonical_json": "{\"audit\":{},\"created\":\"2026-03-13T10:30:00.000Z\",\"items\":[{\"qty\":40,\"sku\":\"AX-1001\",\"tags\":[\"cold\",\"fragile\"]},{\"qty\":0,\"sku\":\"BZ-2002\",\"tags\":[]}],\"record_id\":\"2f6a1c9e-8d43-4b1a-9e2f-7c5d3a8b1f04\",\"warehouse\":{\"active\":true,\"bays\":12,\"city\":\"Raleigh\",\"notes\":null}}",
+    "reference_document_sha256_hex": "1f32cd571a245323d2ff9028221fe7f9fc89a8416bd2649a1c4f90891abb146d",
+    "reference_document_unicode": {
+        "greeting": "héllo — 中文 😀",
+        "é": 1,
+        "e": 2,
+        "zß": "straße",
+        "escapes": "line\nbreak\ttab \"quoted\" back\\slash"
+    },
+    "reference_document_unicode_canonical_json": "{\"e\":2,\"escapes\":\"line\\nbreak\\ttab \\\"quoted\\\" back\\\\slash\",\"greeting\":\"héllo — 中文 😀\",\"zß\":\"straße\",\"é\":1}",
+    "reference_document_unicode_sha256_hex": "c3fde7a9b65d52e7ea5c4bcac5b55e85cd82bef5f647011b7e23ccb40d22b8f4",
+    "reference_document_edges": {
+        "empty_object": {},
+        "empty_array": [],
+        "empty_string": "",
+        "max_safe_integer": 9007199254740992,
+        "negative": -42,
+        "deep": {
+            "a": {
+                "b": {
+                    "c": [
+                        1,
+                        {
+                            "d": []
+                        }
+                    ]
+                }
+            }
+        }
+    },
+    "reference_document_edges_canonical_json": "{\"deep\":{\"a\":{\"b\":{\"c\":[1,{\"d\":[]}]}}},\"empty_array\":[],\"empty_object\":{},\"empty_string\":\"\",\"max_safe_integer\":9007199254740992,\"negative\":-42}",
+    "reference_document_edges_sha256_hex": "e605ea266e2f3948b352a1c6f078e10a954897d7c51497e137ceed00946ebcbd",
+    "reference_sha256_input": "baion-std cross-lineage conformance",
+    "reference_sha256_hex": "cb812203aaf4e4f8f63b242a5814fe036c7346a85efa961ff85a207596e4f451",
+    "reference_integer_valued_floats_canonical_json": "{\"frac\":1.5,\"neg\":-7,\"vals\":[1,2,3]}"
+}

@@ -1,0 +1,11 @@
+# Build artifacts — every lineage builds its CLI into <lineage>/bin/.
+# Patterns are anchored to lineage roots on purpose: an unanchored "bin/"
+# would also swallow real source dirs like rust/src/bin/.
+/*/bin/
+/*/build/
+/*/target/
+/*/dist-newstyle/
+/*/_build/
+/*/.dub/
+*.o
+*.a

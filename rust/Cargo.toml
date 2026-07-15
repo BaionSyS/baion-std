@@ -1,0 +1,20 @@
+[package]
+name = "baion_std"
+version = "0.1.0"
+edition = "2021"
+description = "BAION canonical JSON + SHA-256 for Rust — public standalone library"
+license = "MIT"
+
+[lib]
+name = "baion_std"
+path = "src/lib.rs"
+
+[[bin]]
+name = "baion_canon_hash"
+path = "src/bin/baion_canon_hash.rs"
+
+[dependencies]
+# CROSS-LINEAGE CONTRACT: float_roundtrip required — without it, serde_json
+# parses certain doubles off by 1 ULP, breaking SHA-256 storage-key parity.
+serde_json = { version = "1", features = ["float_roundtrip"] }
+sha2 = "0.10"              # SHA-256 for the canonical-bytes digest

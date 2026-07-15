@@ -1,0 +1,3 @@
+(executable
+ (name baion_canon_hash)
+ (libraries baionstd_public yojson))

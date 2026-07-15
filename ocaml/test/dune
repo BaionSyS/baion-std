@@ -1,0 +1,3 @@
+(executable
+ (name conformance_test)
+ (libraries baionstd_public alcotest yojson))

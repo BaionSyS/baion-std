@@ -1,0 +1,27 @@
+# BAION C++ Style — Allman braces, 100-column, 4-space indent
+# Place at repo root. Applies to all .cpp/.hpp/.h files.
+#
+# Key decisions:
+#   Braces on own line (Allman) — more readable for dense systems code
+#   100-column limit — fits modern monitors without wrapping
+#   4-space indent — matches Python/Bash for cross-language consistency
+#   Section markers: // ── Section ──────── (manual, not enforced by tool)
+---
+BasedOnStyle: LLVM
+IndentWidth: 4
+ColumnLimit: 100
+BreakBeforeBraces: Allman
+AccessModifierOffset: -4
+AllowShortFunctionsOnASingleLine: Empty
+AllowShortIfStatementsOnASingleLine: Never
+AllowShortLoopsOnASingleLine: false
+AlwaysBreakTemplateDeclarations: Yes
+BinPackArguments: false
+BinPackParameters: false
+IncludeBlocks: Regroup
+PointerAlignment: Left
+SortIncludes: CaseSensitive
+SpaceAfterCStyleCast: false
+SpaceBeforeParens: ControlStatements
+KeepEmptyLinesAtTheStartOfBlocks: false
+MaxEmptyLinesToKeep: 2
