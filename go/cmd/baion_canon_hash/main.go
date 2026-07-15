@@ -43,7 +43,13 @@ func main() {
 		os.Exit(1)
 	}
 
-	canonical := baionstd.CanonicalizeJSON(v)
+	// Checked entry point: the cross-lineage contract rejects any decoded
+	// string containing U+0000, so this CLI must too.
+	canonical, err := baionstd.CanonicalizeJSONChecked(v)
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "baion_canon_hash: reject: string contains embedded U+0000 (%v)\n", err)
+		os.Exit(1)
+	}
 	sum := sha256.Sum256([]byte(canonical))
 	fmt.Println(hex.EncodeToString(sum[:]))
 }

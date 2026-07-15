@@ -7,6 +7,7 @@
 //   - No whitespace between tokens
 //   - Numbers: no leading zeros, no trailing decimal, no unnecessary sign
 //   - Strings: minimal escaping (only JSON-required characters)
+//   - U+0000 in any object key or string value (any depth) → rejected
 //
 // CROSS-LINEAGE CONTRACT: output must be byte-identical across every
 // language implementation of this library — the SHA-256 of the canonical
@@ -14,6 +15,40 @@
 
 use serde_json::Value;
 use std::collections::BTreeMap;
+
+/// Rejection error: the input contained U+0000 (NUL) in an object key or
+/// string value at some depth. Canonicalization refuses such input.
+#[derive(Debug, PartialEq, Eq)]
+pub struct NulInputError;
+
+impl std::fmt::Display for NulInputError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(
+            f,
+            "input contains U+0000 (NUL) in an object key or string value; rejected"
+        )
+    }
+}
+
+impl std::error::Error for NulInputError {}
+
+// CROSS-LINEAGE CONTRACT (external review, 2026-07): any input whose object
+// keys or string values contain U+0000 at any depth must be rejected by every
+// language implementation before canonical bytes are produced. serde_json
+// preserves NUL inside String, so the check is a recursive walk over the
+// parsed value — NOT a byte scan of the raw input text. A literal
+// backslash-backslash "u0000" sequence in the source decodes to
+// backslash + "u0000" text, contains no NUL, and must be accepted.
+fn contains_nul(v: &Value) -> bool {
+    match v {
+        Value::String(s) => s.contains('\u{0000}'),
+        Value::Array(arr) => arr.iter().any(contains_nul),
+        Value::Object(map) => map
+            .iter()
+            .any(|(k, v)| k.contains('\u{0000}') || contains_nul(v)),
+        _ => false,
+    }
+}
 
 /// Recursively serialize any serde_json::Value to canonical form.
 pub fn canonicalize_value(v: &Value, out: &mut String) {
@@ -102,10 +137,15 @@ fn escape_json_string(s: &str, out: &mut String) {
 }
 
 /// Canonicalize any JSON value to a string. Convenience wrapper.
-pub fn canonicalize_json(v: &Value) -> String {
+/// Rejects any value containing U+0000 in an object key or string value
+/// (CROSS-LINEAGE CONTRACT — see contains_nul above).
+pub fn canonicalize_json(v: &Value) -> Result<String, NulInputError> {
+    if contains_nul(v) {
+        return Err(NulInputError);
+    }
     let mut out = String::new();
     canonicalize_value(v, &mut out);
-    out
+    Ok(out)
 }
 
 #[cfg(test)]
@@ -119,7 +159,7 @@ mod tests {
             "z": {"m": 1, "a": 2},
             "a": {"z": {"b": true, "a": false}, "a": "first"}
         });
-        let result = canonicalize_json(&deep);
+        let result = canonicalize_json(&deep).unwrap();
         let expected = r#"{"a":{"a":"first","z":{"a":false,"b":true}},"z":{"a":2,"m":1}}"#;
         assert_eq!(result, expected);
     }
@@ -133,7 +173,7 @@ mod tests {
             "tab": "col1\tcol2",
             "normal": "just ascii / and more"
         });
-        let result = canonicalize_json(&j);
+        let result = canonicalize_json(&j).unwrap();
         // Forward slash NOT escaped (minimal escaping)
         assert!(result.contains("just ascii / and more"));
         assert!(result.contains("\\\"hello\\\""));
@@ -142,7 +182,7 @@ mod tests {
     #[test]
     fn number_serialization() {
         let j = json!({"positive": 42, "zero": 0, "negative": -7});
-        let result = canonicalize_json(&j);
+        let result = canonicalize_json(&j).unwrap();
         assert!(result.contains("\"negative\":-7"));
         assert!(result.contains("\"positive\":42"));
         assert!(result.contains("\"zero\":0"));
@@ -151,19 +191,48 @@ mod tests {
     #[test]
     fn integer_valued_floats_drop_trailing_decimal() {
         let j = json!({"vals": [1.0_f64, 2.0_f64], "neg": -7.0_f64, "frac": 1.5_f64});
-        let result = canonicalize_json(&j);
+        let result = canonicalize_json(&j).unwrap();
         assert_eq!(result, r#"{"frac":1.5,"neg":-7,"vals":[1,2]}"#);
     }
 
     #[test]
     fn empty_object() {
         let j = json!({});
-        assert_eq!(canonicalize_json(&j), "{}");
+        assert_eq!(canonicalize_json(&j).unwrap(), "{}");
+    }
+
+    #[test]
+    fn nul_in_string_value_rejected() {
+        // Parsed \u0000 escape yields a real NUL in the String — must reject.
+        let j: Value = serde_json::from_str(r#"{"x":"a\u0000b"}"#).unwrap();
+        assert_eq!(canonicalize_json(&j), Err(NulInputError));
+    }
+
+    #[test]
+    fn nul_in_object_key_rejected() {
+        let j: Value = serde_json::from_str(r#"{"a\u0000":1}"#).unwrap();
+        assert_eq!(canonicalize_json(&j), Err(NulInputError));
+    }
+
+    #[test]
+    fn nul_rejected_at_depth() {
+        // The contract says "any depth" — check inside a nested array/object.
+        let j: Value = serde_json::from_str(r#"{"a":[{"b":"\u0000"}]}"#).unwrap();
+        assert_eq!(canonicalize_json(&j), Err(NulInputError));
+    }
+
+    #[test]
+    fn escaped_backslash_u0000_text_allowed() {
+        // JSON source holds \\u0000 (escaped backslash + text) — the parsed
+        // string is backslash-u-0-0-0-0 as literal text, no NUL, so it must
+        // canonicalize normally.
+        let j: Value = serde_json::from_str(r#"{"x":"a\\u0000b"}"#).unwrap();
+        assert_eq!(canonicalize_json(&j).unwrap(), r#"{"x":"a\\u0000b"}"#);
     }
 
     #[test]
     fn array_order_preserved() {
         let j = json!([3, 1, 2]);
-        assert_eq!(canonicalize_json(&j), "[3,1,2]");
+        assert_eq!(canonicalize_json(&j).unwrap(), "[3,1,2]");
     }
 }

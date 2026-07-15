@@ -94,6 +94,31 @@ let test_hash_over_canonical () =
     (Hash.sha256_hex (Canonical_json.canonicalize_json a))
     (Hash.sha256_hex (Canonical_json.canonicalize_json b))
 
+(* U+0000 rejection: any string (object key or value, any depth) that
+   contains NUL after parsing must be refused before canonicalization.
+   yojson decodes the six-character escape in the JSON source to a real
+   NUL, so {|"a\u0000b"|} below carries an actual U+0000. *)
+let test_nul_rejected_in_value () =
+  let v = Yojson.Safe.from_string {|{"x":"a\u0000b"}|} in
+  Alcotest.check_raises "NUL in string value rejected"
+    (Canonical_json.Nul_rejected "string value contains U+0000")
+    (fun () -> ignore (Canonical_json.canonicalize_json v))
+
+let test_nul_rejected_in_key () =
+  let v = Yojson.Safe.from_string {|{"a\u0000":1}|} in
+  Alcotest.check_raises "NUL in object key rejected"
+    (Canonical_json.Nul_rejected "object key contains U+0000")
+    (fun () -> ignore (Canonical_json.canonicalize_json v))
+
+(* Escaped backslash followed by the text u0000 decodes to a literal
+   backslash + "u0000" — no NUL — and must canonicalize normally. *)
+let test_backslash_u0000_text_allowed () =
+  let v = Yojson.Safe.from_string {|{"x":"a\\u0000b"}|} in
+  Alcotest.(check string)
+    "literal backslash + u0000 text passes"
+    {|{"x":"a\\u0000b"}|}
+    (Canonical_json.canonicalize_json v)
+
 let () =
   Alcotest.run "BAION Canonical JSON Conformance"
     [
@@ -110,6 +135,15 @@ let () =
         [
           Alcotest.test_case "Test integer-valued floats" `Quick
             test_integer_valued_floats;
+        ] );
+      ( "nul_rejection",
+        [
+          Alcotest.test_case "U+0000 in string value rejected" `Quick
+            test_nul_rejected_in_value;
+          Alcotest.test_case "U+0000 in object key rejected" `Quick
+            test_nul_rejected_in_key;
+          Alcotest.test_case "literal backslash + u0000 text allowed" `Quick
+            test_backslash_u0000_text_allowed;
         ] );
       ( "hash",
         [

@@ -110,6 +110,56 @@ static void serialize_number(const nlohmann::json& j, std::string& out)
     }
 }
 
+// ── U+0000 rejection scan ──────────────────────────────────────
+// CROSS-LINEAGE CONTRACT: all lineages reject inputs whose object
+// keys or string values contain U+0000 before canonicalization.
+// nlohmann preserves NUL inside std::string, so std::string::find
+// on the raw bytes is the reliable detector post-parse.
+bool contains_nul(const nlohmann::json& j)
+{
+    switch (j.type())
+    {
+    case nlohmann::json::value_t::string:
+        return j.get_ref<const nlohmann::json::string_t&>().find('\0') !=
+               std::string::npos;
+
+    case nlohmann::json::value_t::array:
+        for (const auto& elem : j)
+        {
+            if (contains_nul(elem))
+                return true;
+        }
+        return false;
+
+    case nlohmann::json::value_t::object:
+        for (auto it = j.begin(); it != j.end(); ++it)
+        {
+            if (it.key().find('\0') != std::string::npos ||
+                contains_nul(it.value()))
+                return true;
+        }
+        return false;
+
+    default:
+        // null / boolean / number / binary — no strings to scan
+        return false;
+    }
+}
+
+// ── Checked canonicalization (library error path) ─────────────
+// Bool-return sentinel because the library is built with
+// -fno-exceptions; callers branch on the return value.
+bool canonicalize_json_checked(const nlohmann::json& j, std::string& out)
+{
+    if (contains_nul(j))
+    {
+        out.clear();
+        return false;
+    }
+    out = canonicalize_json(j);
+    return true;
+}
+
 // ── Recursive canonical serialization ─────────────────────────
 std::string canonicalize_json(const nlohmann::json& j)
 {

@@ -26,7 +26,7 @@ fn check_document(r: &Value, key: &str) {
     let input = r
         .get(key)
         .unwrap_or_else(|| panic!("fixture missing key {}", key));
-    let got = canonicalize_json(input);
+    let got = canonicalize_json(input).expect("fixture contains no U+0000");
 
     let canon_key = format!("{}_canonical_json", key);
     let want = r[canon_key.as_str()]
@@ -85,7 +85,7 @@ fn conformance_integer_valued_floats() {
         "neg": -7.0_f64,
         "frac": 1.5_f64
     });
-    let got = canonicalize_json(&v);
+    let got = canonicalize_json(&v).expect("fixture contains no U+0000");
     let want = r["reference_integer_valued_floats_canonical_json"]
         .as_str()
         .expect("reference_integer_valued_floats_canonical_json str");

@@ -6,6 +6,8 @@
 
 #include "baion/canonical_json.h"
 
+#include "baion/public_types.h"
+
 #include <cJSON.h>
 #include <math.h>
 #include <stdio.h>
@@ -235,6 +237,33 @@ static void canonicalize_value(strbuf_t* sb, const cJSON* item)
     {
         strbuf_appends(sb, "null");
     }
+}
+
+int baion_reject_u0000(const char* input, size_t len)
+{
+    for (size_t i = 0; i < len; i++)
+    {
+        /* Raw NUL: cJSON stops parsing here, so bytes past it would be
+         * silently dropped — the truncated and full documents would hash
+         * identically. */
+        if (input[i] == '\0')
+            return BAION_ERR_PARSE;
+
+        if (input[i] == '\\' && i + 5 < len && memcmp(input + i + 1, "u0000", 5) == 0)
+        {
+            /* Active vs. literal: a run of backslashes pairs off two-at-a-time
+             * into literal backslashes; only an ODD-length run leaves the last
+             * backslash free to start the backslash-u0000 escape. Even run =
+             * literal
+             * backslash followed by the text "u0000" — allowed. */
+            size_t run = 1;
+            while (run <= i && input[i - run] == '\\')
+                run++;
+            if (run % 2 == 1)
+                return BAION_ERR_PARSE;
+        }
+    }
+    return BAION_OK;
 }
 
 char* baion_canonicalize_json(const cJSON* value)

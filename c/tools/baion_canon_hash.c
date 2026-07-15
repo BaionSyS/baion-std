@@ -54,13 +54,15 @@ int main(void)
         return -BAION_ERR_PARSE;
     }
 
-    /* Embedded NUL means the document is not a single well-formed UTF-8
-       JSON text — cJSON would silently stop at the NUL, so reject. */
-    if (strlen(input) != len)
+    /* Pre-parse U+0000 rejection (library-level scan): cJSON decodes the
+       u0000 escape into a NUL byte that truncates the C string, so distinct
+       documents would collapse onto one canonical form. Reviewer contract:
+       reject with exit 1. */
+    if (baion_reject_u0000(input, len) != BAION_OK)
     {
-        fprintf(stderr, "baion_canon_hash: embedded NUL in input\n");
+        fprintf(stderr, "baion_canon_hash: U+0000 in input is unsupported\n");
         free(input);
-        return -BAION_ERR_PARSE;
+        return 1;
     }
 
     /* require_null_terminated=1 rejects trailing garbage after the document

@@ -1,8 +1,9 @@
 cabal-version:      3.0
 name:               baionstd-public
-version:            0.3.0
+version:            0.1.2
 synopsis:           BAION canonical JSON + SHA-256 (Haskell)
-license:            NONE
+license:            MIT
+license-file:       LICENSE
 build-type:         Simple
 
 library

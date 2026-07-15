@@ -16,6 +16,8 @@ import std.conv : to;
 import std.format : format;
 import std.math : isNaN, isInfinity;
 
+import baionstd.types : StdError, errorMessage;
+
 // CROSS-LINEAGE CONTRACT: this formatting must produce byte-identical output
 // with Rust's Ryu (serde_json) and C++'s nlohmann::json shortest-round-trip.
 // All lineages must agree on the decimal representation so that
@@ -166,8 +168,13 @@ void canonicalizeValue(ref Appender!string buf, const JSONValue v)
 }
 
 /// Write a JSON-quoted string with minimal escaping (RFC 8785 §3.2.2.2).
-/// Only escapes characters that JSON requires: " \ and control chars 0x00-0x1F.
+/// Only escapes characters that JSON requires: " \ and control chars 0x01-0x1F.
 /// Forward slash / is NOT escaped.
+///
+/// CROSS-LINEAGE CONTRACT: any string (object key or string value, any depth)
+/// containing U+0000 is REJECTED — all 7 lineages throw/error here so the
+/// CLI exits 1 with a message mentioning U+0000. A literal backslash followed
+/// by "u0000" text is NOT a NUL and passes through unchanged.
 void writeJSONString(ref Appender!string buf, const(char)[] s)
 {
     buf.put('"');
@@ -176,6 +183,10 @@ void writeJSONString(ref Appender!string buf, const(char)[] s)
         char c = s[i];
         switch (c)
         {
+        case '\0':
+            // WHY throw, not escape: contract change (external review) — U+0000
+            // anywhere in input strings invalidates the whole document.
+            throw new Exception(errorMessage(StdError.nulInString));
         case '"':
             buf.put(`\"`);
             break;

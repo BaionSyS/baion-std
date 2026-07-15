@@ -6,6 +6,7 @@
 -- round-tripping number formatting).
 module Baion.STD.CanonicalJson
   ( canonicalizeJson,
+    canonicalizeJsonChecked,
     writeJsonString,
   )
 where
@@ -22,6 +23,28 @@ import Text.Printf (printf)
 
 canonicalizeJson :: A.Value -> String
 canonicalizeJson = canonicalizeValue
+
+-- | Canonicalize with the cross-lineage U+0000 contract enforced:
+-- any string (object key or string value, at any depth) containing
+-- U+0000 (NUL) is rejected. aeson happily preserves NUL in 'T.Text',
+-- so the walk must happen here — a NUL that reached the digest would
+-- silently diverge from lineages whose string types are NUL-hostile.
+-- CROSS-LINEAGE CONTRACT: all 7 lineages reject U+0000 identically.
+canonicalizeJsonChecked :: A.Value -> Either String String
+canonicalizeJsonChecked v
+  | containsNul v =
+      Left "input contains U+0000 (NUL) in a string; rejected by canonical-JSON contract"
+  | otherwise = Right (canonicalizeValue v)
+
+-- | Recursive walk: does any string (key or value) contain U+0000?
+containsNul :: A.Value -> Bool
+containsNul (A.String t) = T.any (== '\NUL') t
+containsNul (A.Array arr) = V.any containsNul arr
+containsNul (A.Object obj) =
+  any
+    (\(k, val) -> T.any (== '\NUL') (AK.toText k) || containsNul val)
+    (AKM.toList obj)
+containsNul _ = False
 
 canonicalizeValue :: A.Value -> String
 canonicalizeValue A.Null = "null"

@@ -1,10 +1,12 @@
 /* BAION STD C — Canonical JSON Tests (public cut: generic value canonicalization) */
 
 #include "baion/canonical_json.h"
+#include "baion/public_types.h"
 #include "test_util.h"
 
 #include <cJSON.h>
 #include <stdlib.h>
+#include <string.h>
 
 static void test_nested_key_sorting(void)
 {
@@ -109,6 +111,34 @@ static void test_booleans(void)
     cJSON_Delete(obj);
 }
 
+static void test_u0000_rejection(void)
+{
+    /* Active escape in a value: cJSON would decode it to a NUL byte and
+     * truncate the string, so the pre-parse scan must reject. */
+    const char* val_escape = "{\"x\":\"a\\u0000b\"}";
+    ASSERT_INT_EQ(baion_reject_u0000(val_escape, strlen(val_escape)), BAION_ERR_PARSE);
+
+    /* Active escape in a key */
+    const char* key_escape = "{\"a\\u0000\":1}";
+    ASSERT_INT_EQ(baion_reject_u0000(key_escape, strlen(key_escape)), BAION_ERR_PARSE);
+
+    /* Even backslash run = literal backslash + the text "u0000": allowed */
+    const char* literal = "{\"x\":\"a\\\\u0000b\"}";
+    ASSERT_INT_EQ(baion_reject_u0000(literal, strlen(literal)), BAION_OK);
+
+    /* Odd run of three: literal backslash THEN an active escape: reject */
+    const char* triple = "{\"x\":\"a\\\\\\u0000b\"}";
+    ASSERT_INT_EQ(baion_reject_u0000(triple, strlen(triple)), BAION_ERR_PARSE);
+
+    /* Raw 0x00 byte anywhere in the input: reject */
+    const char raw_nul[] = {'{', '"', 'x', '"', ':', '\0', '1', '}'};
+    ASSERT_INT_EQ(baion_reject_u0000(raw_nul, sizeof(raw_nul)), BAION_ERR_PARSE);
+
+    /* Clean document: passes */
+    const char* clean = "{\"x\":\"a b\"}";
+    ASSERT_INT_EQ(baion_reject_u0000(clean, strlen(clean)), BAION_OK);
+}
+
 int main(void)
 {
     printf("test_canonical_json:\n");
@@ -118,6 +148,7 @@ int main(void)
     RUN_TEST(test_array_order_preserved);
     RUN_TEST(test_empty_payload);
     RUN_TEST(test_booleans);
+    RUN_TEST(test_u0000_rejection);
     TEST_SUMMARY();
     return _test_failed;
 }

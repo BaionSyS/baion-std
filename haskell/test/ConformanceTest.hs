@@ -75,7 +75,10 @@ conformanceTests =
       testCase "Test 3: edge-case document canonical JSON + SHA-256" $
         checkDocument "reference_document_edges",
       testCase "Test 4: plain SHA-256 vector" testSha256Vector,
-      testCase "Test 5: integer-valued floats" testIntegerValuedFloats
+      testCase "Test 5: integer-valued floats" testIntegerValuedFloats,
+      testCase "Test 6: U+0000 in string value rejected" testNulValueRejected,
+      testCase "Test 7: U+0000 in object key rejected" testNulKeyRejected,
+      testCase "Test 8: literal backslash-u0000 text allowed" testEscapedNulTextAllowed
     ]
 
 testSha256Vector :: Assertion
@@ -101,3 +104,36 @@ testIntegerValuedFloats = do
   let canonical = canonicalizeJson v
   let expected = getStr ref_ "reference_integer_valued_floats_canonical_json"
   canonical @?= expected
+
+-- U+0000 contract (CROSS-LINEAGE): any string — key or value, any
+-- depth — containing NUL is rejected by checked canonicalization.
+-- aeson decodes the six-char JSON escape "\\u0000" to a real NUL in
+-- Text, so the rejection walk in the library is the only guard.
+isRejectedForNul :: Either String String -> Assertion
+isRejectedForNul (Left err) =
+  assertBool
+    ("error message must mention U+0000, got: " ++ err)
+    (T.isInfixOf "U+0000" (T.pack err))
+isRejectedForNul (Right c) =
+  assertFailure ("expected U+0000 rejection, canonicalized to: " ++ c)
+
+testNulValueRejected :: Assertion
+testNulValueRejected =
+  case A.eitherDecodeStrict' (BSC.pack "{\"x\":\"a\\u0000b\"}") of
+    Left err -> assertFailure ("fixture must parse: " ++ err)
+    Right v -> isRejectedForNul (canonicalizeJsonChecked v)
+
+testNulKeyRejected :: Assertion
+testNulKeyRejected =
+  case A.eitherDecodeStrict' (BSC.pack "{\"a\\u0000\":1}") of
+    Left err -> assertFailure ("fixture must parse: " ++ err)
+    Right v -> isRejectedForNul (canonicalizeJsonChecked v)
+
+-- Literal backslash + "u0000" text (JSON source "a\\\\u0000b") decodes
+-- to a backslash character, not a NUL — it must pass unchanged.
+testEscapedNulTextAllowed :: Assertion
+testEscapedNulTextAllowed =
+  case A.eitherDecodeStrict' (BSC.pack "{\"x\":\"a\\\\u0000b\"}") of
+    Left err -> assertFailure ("fixture must parse: " ++ err)
+    Right v ->
+      canonicalizeJsonChecked v @?= Right "{\"x\":\"a\\\\u0000b\"}"

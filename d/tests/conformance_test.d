@@ -113,3 +113,34 @@ unittest
     JSONValue tiny = JSONValue(5e-8);
     assert(canonicalizeJSON(tiny) == "5e-8", "edge case FAILED: exponent normalization");
 }
+
+// ── U+0000 rejection (contract change, external review) ──
+// Any string — object key or string value, any depth — containing U+0000
+// must be rejected. A literal backslash followed by "u0000" text is NOT
+// a NUL and must pass through unchanged.
+unittest
+{
+    import std.exception : assertThrown, collectExceptionMsg;
+    import std.algorithm.searching : canFind;
+
+    // U+0000 in a string value (JSON \u0000 escape decodes to a real NUL)
+    auto nulValue = parseJSON(`{"x":"a\u0000b"}`);
+    string msg = collectExceptionMsg(canonicalizeJSON(nulValue));
+    assert(msg !is null && msg.canFind("U+0000"),
+            "U+0000 rejection FAILED: value containing NUL not rejected with U+0000 message");
+
+    // U+0000 in an object key
+    auto nulKey = parseJSON(`{"a\u0000":1}`);
+    assertThrown(canonicalizeJSON(nulKey),
+            "U+0000 rejection FAILED: key containing NUL not rejected");
+
+    // U+0000 nested deep inside arrays/objects
+    auto nulDeep = parseJSON(`{"a":[1,{"b":["\u0000"]}]}`);
+    assertThrown(canonicalizeJSON(nulDeep),
+            "U+0000 rejection FAILED: nested NUL not rejected");
+
+    // Literal backslash + "u0000" text (JSON \\u0000) is NOT a NUL — allowed
+    auto literalBackslash = parseJSON(`{"x":"a\\u0000b"}`);
+    assert(canonicalizeJSON(literalBackslash) == `{"x":"a\\u0000b"}`,
+            "U+0000 rejection FAILED: literal backslash + u0000 text wrongly rejected");
+}

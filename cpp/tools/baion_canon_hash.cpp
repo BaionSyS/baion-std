@@ -3,7 +3,7 @@
 // Reads UTF-8 JSON on stdin, canonicalizes it with the BAION
 // canonical JSON rules, prints the lowercase-hex SHA-256 of the
 // canonical bytes followed by a newline. Exit 0 on success,
-// nonzero on parse error.
+// nonzero on parse error or on U+0000 anywhere in a string.
 
 #include "baion/canonical_json.hpp"
 #include "baion/hash.hpp"
@@ -27,7 +27,16 @@ int main()
         return 1;
     }
 
-    const std::string canonical = baion::std_lib::canonicalize_json(j);
+    // Checked canonicalization — rejects any object key or string
+    // value containing U+0000 (cross-lineage contract).
+    std::string canonical;
+    if (!baion::std_lib::canonicalize_json_checked(j, canonical))
+    {
+        std::fprintf(stderr,
+                     "baion_canon_hash: input contains U+0000 in a string "
+                     "or object key — rejected\n");
+        return 1;
+    }
     const std::string hex = baion::std_lib::sha256_hex(canonical);
 
     std::fputs(hex.c_str(), stdout);

@@ -18,6 +18,17 @@ inputs=(
   '{"escapes":"line\nbreak\ttab \"quoted\" back\\slash"}'
   '{"max_safe":9007199254740992,"neg":-42,"empty":""}'
   '{"deep":{"a":{"b":{"c":[1,{"d":[]}]}}}}'
+  '{"x":1.0}'
+  '1.0'
+  '{"x":"a\\u0000b"}'
+)
+
+# Inputs every lineage must UNIFORMLY REJECT (nonzero exit): U+0000 is outside
+# the supported domain because one lineage cannot represent it losslessly —
+# accepting it anywhere would allow silent canonicalization collisions.
+reject_inputs=(
+  '{"x":"a\u0000b"}'
+  '{"a\u0000":1}'
 )
 
 fail=0
@@ -55,6 +66,19 @@ for L in "${LINEAGES[@]}"; do
   h="$("$HERE/$L/bin/baion_canon_hash" < "$HERE/conformance_reference.json")" || { echo "  ERROR $L on fixture"; fail=1; continue; }
   [ -z "$ref" ] && ref="$h"
   if [ "$h" = "$ref" ]; then printf '  MATCH %-8s %s\n' "$L" "$h"; else printf '  DIFF  %-8s %s\n' "$L" "$h"; fail=1; fi
+done
+
+# Uniform-rejection pass: every lineage must refuse these with nonzero exit.
+for i in "${!reject_inputs[@]}"; do
+  echo "reject $i: ${reject_inputs[$i]}"
+  for L in "${LINEAGES[@]}"; do
+    if printf '%s' "${reject_inputs[$i]}" | "$HERE/$L/bin/baion_canon_hash" >/dev/null 2>&1; then
+      printf '  BAD   %-8s accepted input it must reject\n' "$L"
+      fail=1
+    else
+      printf '  REJECT %-7s ok\n' "$L"
+    fi
+  done
 done
 
 if [ "$fail" -eq 0 ]; then

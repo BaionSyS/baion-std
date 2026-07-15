@@ -9,6 +9,7 @@ package baionstd
 
 import (
 	"encoding/json"
+	"errors"
 	"fmt"
 	"math"
 	"sort"
@@ -16,11 +17,60 @@ import (
 	"strings"
 )
 
+// ErrEmbeddedNUL rejects inputs whose strings contain U+0000.
+//
+// CROSS-LINEAGE CONTRACT: every language implementation uniformly REJECTS
+// documents with an embedded NUL in any string (key or value) — C-lineage
+// implementations cannot round-trip NUL through NUL-terminated strings, so
+// accepting it here would let Go produce hashes no sibling can reproduce.
+var ErrEmbeddedNUL = errors.New("embedded U+0000 in string")
+
 // CanonicalizeJSON converts any JSON-compatible value to canonical JSON string.
 func CanonicalizeJSON(v interface{}) string {
 	var b strings.Builder
 	canonicalizeValue(&b, v)
 	return b.String()
+}
+
+// CanonicalizeJSONChecked canonicalizes v after enforcing the cross-lineage
+// input contract: any string (key or value) containing U+0000 is rejected
+// with ErrEmbeddedNUL. Callers that hash the result MUST use this entry
+// point — CanonicalizeJSON alone would emit an escaped NUL and silently diverge
+// from lineages that reject.
+func CanonicalizeJSONChecked(v interface{}) (string, error) {
+	if err := checkNoEmbeddedNUL(v); err != nil {
+		return "", err
+	}
+	return CanonicalizeJSON(v), nil
+}
+
+// checkNoEmbeddedNUL walks every decoded string in the value tree.
+// A literal backslash-u-0000 six-character sequence in source text decodes
+// to the six characters backslash-u-0-0-0-0 — not rune 0 — and is therefore allowed;
+// only an actual decoded U+0000 rune is rejected.
+func checkNoEmbeddedNUL(v interface{}) error {
+	switch val := v.(type) {
+	case string:
+		if strings.ContainsRune(val, 0) {
+			return ErrEmbeddedNUL
+		}
+	case map[string]interface{}:
+		for k, item := range val {
+			if strings.ContainsRune(k, 0) {
+				return ErrEmbeddedNUL
+			}
+			if err := checkNoEmbeddedNUL(item); err != nil {
+				return err
+			}
+		}
+	case []interface{}:
+		for _, item := range val {
+			if err := checkNoEmbeddedNUL(item); err != nil {
+				return err
+			}
+		}
+	}
+	return nil
 }
 
 // canonicalizeValue recursively writes a JSON value in canonical form.
@@ -35,7 +85,7 @@ func canonicalizeValue(b *strings.Builder, v interface{}) {
 			b.WriteString("false")
 		}
 	case json.Number:
-		b.WriteString(string(val))
+		b.WriteString(formatJSONNumber(val))
 	case float64:
 		b.WriteString(formatFloat64(val))
 	case float32:
@@ -145,4 +195,31 @@ func formatFloat64(v float64) string {
 		return "null"
 	}
 	return strconv.FormatFloat(v, 'f', -1, 64)
+}
+
+// CROSS-LINEAGE CONTRACT: json.Number preserves the *source spelling* of a
+// number ("1.0", "1e0"), but the canonical form is decided by numeric value,
+// not spelling (RFC 8785 §3.2.2.3) — every sibling lineage emits 1.0 → "1".
+// Writing the raw token verbatim was the parity bug: Go alone kept "1.0".
+func formatJSONNumber(n json.Number) string {
+	s := string(n)
+	// Pure integer tokens (no '.', 'e', 'E') bypass float64 so 64-bit
+	// integers keep full precision — a float64 round-trip corrupts values
+	// beyond 2^53. FormatInt/FormatUint re-emission also normalizes "-0".
+	if !strings.ContainsAny(s, ".eE") {
+		if i, err := n.Int64(); err == nil {
+			return strconv.FormatInt(i, 10)
+		}
+		if u, err := strconv.ParseUint(s, 10, 64); err == nil {
+			return strconv.FormatUint(u, 10)
+		}
+	}
+	f, err := n.Float64()
+	if err != nil {
+		// Unparseable token: the decoder already validated JSON grammar,
+		// so this is unreachable in practice; emit the source token rather
+		// than invent a value.
+		return s
+	}
+	return formatFloat64(f)
 }

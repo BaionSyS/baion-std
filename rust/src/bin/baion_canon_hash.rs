@@ -4,7 +4,8 @@
 // Reads UTF-8 JSON on stdin, canonicalizes it (keys sorted at every level,
 // no whitespace, minimal escaping, integer-valued floats stripped of ".0"),
 // then prints the lowercase-hex SHA-256 of the canonical bytes + newline.
-// Exit 0 on success; nonzero on parse error (message to stderr).
+// Exit 0 on success; exit 1 on parse error or on rejected input — any
+// object key or string value containing U+0000 (message to stderr).
 
 use baion_std::canonical_json::canonicalize_json;
 use baion_std::hash::sha256_hex;
@@ -28,7 +29,16 @@ fn main() -> ExitCode {
         }
     };
 
-    let canonical = canonicalize_json(&value);
+    // CROSS-LINEAGE CONTRACT (external review, 2026-07): U+0000 anywhere in
+    // an object key or string value is rejected — the library walk decides,
+    // so the CLI and direct library callers agree on what is refused.
+    let canonical = match canonicalize_json(&value) {
+        Ok(c) => c,
+        Err(e) => {
+            eprintln!("baion_canon_hash: {}", e);
+            return ExitCode::from(1);
+        }
+    };
     println!("{}", sha256_hex(canonical.as_bytes()));
     ExitCode::SUCCESS
 }

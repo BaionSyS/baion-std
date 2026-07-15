@@ -89,6 +89,78 @@ TEST(CanonicalJSON, ArrayOrderPreserved)
     EXPECT_EQ(canonicalize_json(j), "[3,1,2]");
 }
 
+// ── U+0000 rejection: NUL in a string value ───────────────────
+// The six-character escape in source text parses to a real NUL
+// inside the std::string; the checked path must reject it.
+TEST(CanonicalJSON, RejectsNulInStringValue)
+{
+    nlohmann::json j =
+        nlohmann::json::parse("{\"x\":\"a\\u0000b\"}", nullptr, false);
+    ASSERT_FALSE(j.is_discarded());
+
+    EXPECT_TRUE(contains_nul(j));
+
+    std::string out;
+    EXPECT_FALSE(canonicalize_json_checked(j, out));
+    EXPECT_TRUE(out.empty());
+}
+
+// ── U+0000 rejection: NUL in an object key ────────────────────
+TEST(CanonicalJSON, RejectsNulInObjectKey)
+{
+    nlohmann::json j =
+        nlohmann::json::parse("{\"a\\u0000\":1}", nullptr, false);
+    ASSERT_FALSE(j.is_discarded());
+
+    EXPECT_TRUE(contains_nul(j));
+
+    std::string out;
+    EXPECT_FALSE(canonicalize_json_checked(j, out));
+}
+
+// ── U+0000 rejection: NUL nested deep in arrays/objects ───────
+TEST(CanonicalJSON, RejectsNulAtDepth)
+{
+    nlohmann::json j = nlohmann::json::parse(
+        "{\"a\":[1,{\"b\":[\"ok\",\"x\\u0000y\"]}]}", nullptr, false);
+    ASSERT_FALSE(j.is_discarded());
+
+    EXPECT_TRUE(contains_nul(j));
+
+    std::string out;
+    EXPECT_FALSE(canonicalize_json_checked(j, out));
+}
+
+// ── Double-backslash + u0000 is text, not a NUL — allowed ─────
+// Source bytes \\u0000 parse to the 6-character text
+// backslash + "u0000". No U+0000 character exists, so the
+// checked path must accept and canonicalize normally.
+TEST(CanonicalJSON, AllowsLiteralBackslashU0000Text)
+{
+    nlohmann::json j =
+        nlohmann::json::parse(R"({"x":"a\\u0000b"})", nullptr, false);
+    ASSERT_FALSE(j.is_discarded());
+
+    EXPECT_FALSE(contains_nul(j));
+
+    std::string out;
+    EXPECT_TRUE(canonicalize_json_checked(j, out));
+    EXPECT_EQ(out, "{\"x\":\"a\\\\u0000b\"}");
+}
+
+// ── Checked path matches unchecked path on clean input ────────
+TEST(CanonicalJSON, CheckedMatchesUncheckedOnCleanInput)
+{
+    nlohmann::json j =
+        nlohmann::json::parse(R"({"b":1,"a":[1,2]})", nullptr, false);
+    ASSERT_FALSE(j.is_discarded());
+
+    std::string out;
+    ASSERT_TRUE(canonicalize_json_checked(j, out));
+    EXPECT_EQ(out, canonicalize_json(j));
+    EXPECT_EQ(out, "{\"a\":[1,2],\"b\":1}");
+}
+
 // ── Integer-valued floats canonicalize without trailing decimal ──
 // Build the value with explicit float-tagged
 // numbers (nlohmann::json::value_t::number_float) so the canonicalizer sees

@@ -6,7 +6,7 @@
 -- to stderr with a nonzero exit so pipelines fail loudly.
 module Main (main) where
 
-import Baion.STD.CanonicalJson (canonicalizeJson)
+import Baion.STD.CanonicalJson (canonicalizeJsonChecked)
 import Baion.STD.Hash (sha256HexBytes)
 import qualified Data.Aeson as A
 import qualified Data.ByteString as BS
@@ -23,6 +23,14 @@ main = do
       hPutStrLn stderr ("baion-canon-hash: parse error: " ++ err)
       exitFailure
     Right v ->
-      -- CROSS-LINEAGE CONTRACT: digest is over the canonical string's
-      -- UTF-8 bytes, matching the other lineages' canonical-bytes hash.
-      putStrLn (sha256HexBytes (TE.encodeUtf8 (T.pack (canonicalizeJson v))))
+      -- Checked canonicalization: the library rejects any string
+      -- containing U+0000 (aeson preserves NUL in Text, so the CLI
+      -- would otherwise pass it through to the digest).
+      case canonicalizeJsonChecked v of
+        Left err -> do
+          hPutStrLn stderr ("baion-canon-hash: " ++ err)
+          exitFailure
+        Right canonical ->
+          -- CROSS-LINEAGE CONTRACT: digest is over the canonical string's
+          -- UTF-8 bytes, matching the other lineages' canonical-bytes hash.
+          putStrLn (sha256HexBytes (TE.encodeUtf8 (T.pack canonical)))

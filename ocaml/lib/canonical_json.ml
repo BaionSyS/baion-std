@@ -6,6 +6,28 @@
    CAUTION: yojson's Assoc preserves insertion order but does NOT
    guarantee sorted keys. We sort keys before serialization. *)
 
+(** Raised when an input contains U+0000 in any string (key or value). *)
+exception Nul_rejected of string
+
+(* CROSS-LINEAGE CONTRACT: any input whose strings (object keys or string
+   values, at any depth) contain U+0000 must be rejected by all seven
+   lineage libraries. yojson preserves NUL inside parsed OCaml strings
+   (both from a raw 0x00 byte and from a backslash-u0000 escape), so we walk the
+   parsed value explicitly rather than relying on the parser to refuse it. *)
+let rec reject_nul (v : Yojson.Safe.t) =
+  match v with
+  | `String s when String.contains s '\000' ->
+      raise (Nul_rejected "string value contains U+0000")
+  | `Null | `Bool _ | `Int _ | `Intlit _ | `Float _ | `String _ -> ()
+  | `List items -> List.iter reject_nul items
+  | `Assoc pairs ->
+      List.iter
+        (fun (k, item) ->
+          if String.contains k '\000' then
+            raise (Nul_rejected "object key contains U+0000");
+          reject_nul item)
+        pairs
+
 (* Write a JSON-quoted string with minimal escaping (RFC 8785 §3.2.2.2).
    Only escapes: quotes, backslash, and control chars 0x00-0x1F.
    Forward slash is NOT escaped. *)
@@ -69,8 +91,10 @@ let rec canonicalize_value buf (v : Yojson.Safe.t) =
       Buffer.add_char buf '}'
 
 (** Canonicalize any JSON value to a canonical string. Keys sorted
-    lexicographically at every nesting level, no whitespace. *)
+    lexicographically at every nesting level, no whitespace.
+    @raise Nul_rejected if any string (key or value) contains U+0000. *)
 let canonicalize_json (v : Yojson.Safe.t) : string =
+  reject_nul v;
   let buf = Buffer.create 256 in
   canonicalize_value buf v;
   Buffer.contents buf
