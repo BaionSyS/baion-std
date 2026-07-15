@@ -22,3 +22,4 @@
 {"name": "same_key_sibling_objects", "input": "[{\"k\":1},{\"k\":2}]", "sha256": "98fcf287e1991c1602a189793606501715f8ae194db5dcaaf6515ed29937c20d"}
 {"name": "micro_boundary", "input": "{\"x\":0.000001}", "sha256": "2d6412ab0155bb89d63b73dbf83334b26b39d03e8c832cc253c6a6caceba9733"}
 {"name": "big_float_shortest_digits", "input": "{\"x\":65219416364867774.9377591}", "sha256": "96df26a780f11e7a70c701e23ff9f79ab115118d77c70945885996a1014a2d84"}
+{"name": "huge_integer_valued_float", "input": "{\"x\":100000000000000000000.0}", "sha256": "356acd219b8c369fc389513fb5c3f9fc2977fff3c432bab9df5b1e3a2800b072"}

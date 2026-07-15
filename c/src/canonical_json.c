@@ -10,16 +10,21 @@
 
 #include <cJSON.h>
 #include <math.h>
+#include <stdint.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
 
-/* Dynamic string buffer */
+/* Dynamic string buffer. Allocation failure latches `oom`; every append
+ * becomes a no-op once set, so the walk finishes cheaply and the public
+ * entry point reports one defined failure (NULL) instead of any internal
+ * path dereferencing a failed allocation. */
 typedef struct
 {
     char* data;
     size_t len;
     size_t cap;
+    int oom;
 } strbuf_t;
 
 static void strbuf_init(strbuf_t* sb)
@@ -27,22 +32,53 @@ static void strbuf_init(strbuf_t* sb)
     sb->cap = 512;
     sb->data = (char*)malloc(sb->cap);
     sb->len = 0;
-    sb->data[0] = '\0';
+    sb->oom = (sb->data == NULL);
+    if (!sb->oom)
+        sb->data[0] = '\0';
 }
 
 static void strbuf_ensure(strbuf_t* sb, size_t extra)
 {
-    if (sb->len + extra + 1 > sb->cap)
+    if (sb->oom)
+        return;
+    /* len + extra + 1 must not wrap: a wrapped "needed" would pass the
+     * capacity test and let the memcpy in strbuf_append run off the end. */
+    if (extra > SIZE_MAX - sb->len - 1)
     {
-        while (sb->len + extra + 1 > sb->cap)
-            sb->cap *= 2;
-        sb->data = (char*)realloc(sb->data, sb->cap);
+        sb->oom = 1;
+        return;
+    }
+    size_t needed = sb->len + extra + 1;
+    if (needed > sb->cap)
+    {
+        size_t cap = sb->cap;
+        while (cap < needed)
+        {
+            if (cap > SIZE_MAX / 2)
+            {
+                cap = needed; /* doubling would wrap; exact size is enough */
+                break;
+            }
+            cap *= 2;
+        }
+        /* realloc into a temporary: assigning a NULL return straight to
+         * sb->data would leak the original block and lose the buffer. */
+        char* grown = (char*)realloc(sb->data, cap);
+        if (!grown)
+        {
+            sb->oom = 1;
+            return;
+        }
+        sb->data = grown;
+        sb->cap = cap;
     }
 }
 
 static void strbuf_append(strbuf_t* sb, const char* s, size_t n)
 {
     strbuf_ensure(sb, n);
+    if (sb->oom)
+        return;
     memcpy(sb->data + sb->len, s, n);
     sb->len += n;
     sb->data[sb->len] = '\0';
@@ -51,6 +87,8 @@ static void strbuf_append(strbuf_t* sb, const char* s, size_t n)
 static void strbuf_appendc(strbuf_t* sb, char c)
 {
     strbuf_ensure(sb, 1);
+    if (sb->oom)
+        return;
     sb->data[sb->len++] = c;
     sb->data[sb->len] = '\0';
 }
@@ -134,6 +172,11 @@ static void canonicalize_object(strbuf_t* sb, const cJSON* obj)
 
     /* Collect pointers and sort by key */
     const cJSON** keys = (const cJSON**)malloc((size_t)count * sizeof(cJSON*));
+    if (!keys)
+    {
+        sb->oom = 1;
+        return;
+    }
     int i = 0;
     for (child = obj->child; child; child = child->next)
     {
@@ -186,7 +229,11 @@ static void write_number(strbuf_t* sb, const cJSON* item)
      * trailing decimal (RFC 8785 §3.2.2.3 / ECMA-262 §7.1.12.1). All
      * language implementations emit 1.0 → "1", -3.0 → "-3", 1.5 → "1.5";
      * disagreement on this branch breaks SHA-256 digest parity. */
-    if (d == (double)(long long)d && fabs(d) < 1e15)
+    /* Range check MUST precede the integer conversion: for |d| >= 2^63
+     * (e.g. 1e20, inside the admitted domain |v| < 1e21) the cast to
+     * long long is undefined behavior (C11 6.3.1.4p1). Same guard order
+     * as the C++ lineage. */
+    if (fabs(d) < 1e15 && trunc(d) == d)
     {
         char buf[32];
         snprintf(buf, sizeof(buf), "%lld", (long long)d);
@@ -792,5 +839,12 @@ char* baion_canonicalize_json(const cJSON* value)
     strbuf_t sb;
     strbuf_init(&sb);
     canonicalize_value(&sb, value);
+    if (sb.oom)
+    {
+        /* Defined failure: a partial canonical string must never reach a
+         * hash — free it and report NULL rather than a truncated form. */
+        free(sb.data);
+        return NULL;
+    }
     return sb.data;
 }

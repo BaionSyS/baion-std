@@ -11,10 +11,16 @@ on:
   pull_request:
   workflow_dispatch:
 
+# Least privilege: every job only reads the repo. Nothing here writes
+# contents, issues, or packages (GitHub hardening guidance).
+permissions:
+  contents: read
+
 jobs:
   build:
     name: build (${{ matrix.lineage }})
     runs-on: ubuntu-latest
+    timeout-minutes: 30
     strategy:
       fail-fast: false
       matrix:
@@ -29,22 +35,27 @@ jobs:
           go-version: '1.22'
           cache-dependency-path: go/go.mod
 
+      # Toolchains pinned to exact versions (not floating "latest"/"stable")
+      # so a moved toolchain cannot silently change what a release build
+      # means. Versions match the locally verified v0.2.1 build environment.
       - name: Set up Rust
         if: matrix.lineage == 'rust'
         uses: dtolnay/rust-toolchain@4be7066ada62dd38de10e7b70166bc74ed198c30 # stable (2026-07-15)
+        with:
+          toolchain: '1.94.0'
 
       - name: Set up D
         if: matrix.lineage == 'd'
         uses: dlang-community/setup-dlang@d7d85fcde7c4cd5f9a6618fce1bccc316e1e910b # v2
         with:
-          compiler: dmd-latest
+          compiler: dmd-2.112.0
 
       - name: Set up Haskell
         if: matrix.lineage == 'haskell'
         uses: haskell-actions/setup@cd0d9bdd65b20557f41bea4dbe43d0b5fbbfe553 # v2.11.0
         with:
-          ghc-version: '9.6'
-          cabal-version: 'latest'
+          ghc-version: '9.6.7'
+          cabal-version: '3.16.1.0'
 
       - name: Set up OCaml
         if: matrix.lineage == 'ocaml'
@@ -100,7 +111,7 @@ jobs:
         if: matrix.lineage == 'ocaml'
         working-directory: ocaml
         run: |
-          opam install --yes dune yojson digestif alcotest
+          opam install --yes dune.3.21.1 yojson.3.0.0 digestif.1.3.0 alcotest.1.9.1
           make build test
 
       # Sanity: the CLI the verify job will receive must exist and answer.
@@ -115,10 +126,41 @@ jobs:
           path: ${{ matrix.lineage }}/bin/baion_canon_hash
           if-no-files-found: error
 
+  # Sanitizer gate for the two memory-unsafe lineages: same corpus contract
+  # as the verifier, but the CLI is built with ASan+UBSan and aborts on any
+  # undefined behavior. Added in v0.2.1 after UBSan caught an out-of-range
+  # double→long long conversion on an admitted input (1e20) that the plain
+  # build masked by saturating.
+  sanitize:
+    name: sanitize (${{ matrix.lineage }})
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    strategy:
+      fail-fast: false
+      matrix:
+        lineage: [c, cpp]
+    env:
+      SAN_FLAGS: -fsanitize=address,undefined,float-cast-overflow -fno-sanitize-recover=all -fno-omit-frame-pointer
+    steps:
+      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
+
+      - name: Build and test with ASan+UBSan
+        run: |
+          cmake -S ${{ matrix.lineage }} -B ${{ matrix.lineage }}/build-san \
+            -DCMAKE_C_FLAGS="$SAN_FLAGS" \
+            -DCMAKE_CXX_FLAGS="$SAN_FLAGS" \
+            -DCMAKE_EXE_LINKER_FLAGS="$SAN_FLAGS"
+          cmake --build ${{ matrix.lineage }}/build-san
+          ctest --test-dir ${{ matrix.lineage }}/build-san --output-on-failure
+
+      - name: Run full corpus through sanitized CLI
+        run: python3 conformance/run_corpus_cli.py ${{ matrix.lineage }}/bin/baion_canon_hash
+
   verify:
     name: verify 7/7 byte-identity
     needs: build
     runs-on: ubuntu-latest
+    timeout-minutes: 15
     steps:
       - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
 

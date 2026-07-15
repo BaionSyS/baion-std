@@ -154,6 +154,11 @@ int main(void)
 
     char* canonical = baion_canonicalize_json(root);
     cJSON_Delete(root);
+    if (!canonical)
+    {
+        fprintf(stderr, "baion_canon_hash: out of memory during canonicalization\n");
+        return -BAION_ERR_PARSE;
+    }
 
     uint8_t hash[32];
     baion_sha256((const uint8_t*)canonical, strlen(canonical), hash);

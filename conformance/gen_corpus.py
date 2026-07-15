@@ -53,6 +53,11 @@ ACCEPT = [
     # Pins ES-262 shortest-digits for an integer-valued double beyond 2^53:
     # exact value is ...776 but the canonical spelling is the 16-digit ...780.
     ("big_float_shortest_digits", '{"x":65219416364867774.9377591}'),
+    # Regression for the v0.2.0 C-lineage UB (fixed v0.2.1): a fractional
+    # token whose value is integer-valued and >= 2^63 but inside the admitted
+    # domain (|v| < 1e21). The old C writer cast to long long BEFORE its
+    # range check — undefined behavior per C11 6.3.1.4p1, caught by UBSan.
+    ("huge_integer_valued_float", '{"x":100000000000000000000.0}'),
 ]
 
 # Uniform-rejection contract. reason is documentation for humans + remediation maps.
