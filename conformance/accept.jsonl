@@ -1,0 +1,23 @@
+{"name": "key_sort_basic", "input": "{\"b\":1,\"a\":[1,2]}", "sha256": "94a786c3662bc7beeb598efa7d8cb58d7bea25d6c275ea9785a0230ff1f8c2ba"}
+{"name": "key_sort_unicode", "input": "{\"z\":1,\"a\":\"\u00e9\"}", "sha256": "fb64e573f7cde5b7efeda52ffc4bdd57572055b0b7e64a70172606c82c6c7eac"}
+{"name": "nested_mixed", "input": "{\"nested\":{\"y\":[true,false,null],\"x\":0.5},\"empty\":{},\"arr\":[]}", "sha256": "0a9f877d8a670ed579d21f5b7e32d870cde347fc0e6450d9f284724217f025da"}
+{"name": "unicode_keys", "input": "{\"\u00e9\":1,\"e\":2,\"z\u00df\":\"stra\u00dfe\"}", "sha256": "f9eaba80c1a925d133b1adfe9ae4e2ffc486048dc216131f40a1152ef0ddc665"}
+{"name": "escape_zoo", "input": "{\"escapes\":\"line\\nbreak\\ttab \\\"quoted\\\" back\\\\slash\"}", "sha256": "fb152eccf9225e2728e71bdcdaa0781912053ee5bce83d7195908f929a1f7cef"}
+{"name": "max_safe_int", "input": "{\"max_safe\":9007199254740992,\"neg\":-42,\"empty\":\"\"}", "sha256": "b8913d02715acee3830bff9f7aa690cc57b9abce0d003292e87e8b0b57f142ca"}
+{"name": "deep_structure", "input": "{\"deep\":{\"a\":{\"b\":{\"c\":[1,{\"d\":[]}]}}}}", "sha256": "3fc8cc84e97caacd0c18f216100e13f3ae35c4f5569b0a193b706e9b217c4362"}
+{"name": "float_int_normalizes", "input": "{\"x\":1.0}", "sha256": "5041bf1f713df204784353e82f6a4a535931cb64f1f4b4a5aeaffcb720918b22"}
+{"name": "bare_float_int", "input": "1.0", "sha256": "6b86b273ff34fce19d6b804eff5a3f5747ada4eaa22f1d49c01e52ddb7875b4b"}
+{"name": "literal_backslash_u0000", "input": "{\"x\":\"a\\\\u0000b\"}", "sha256": "28b57382737c1f94b8d05d8cfa2978d0c28b377a661afe339c4654e6550b6a0b"}
+{"name": "near_duplicate_keys", "input": "{\"aa\":1,\"ab\":2}", "sha256": "33528cbdd6efd8bbdc3fb2681a33fda1da9390813389d4afab0a2f6247088fdc"}
+{"name": "neg_zero_int", "input": "{\"x\":-0}", "sha256": "5bff452c5ed93f2e87a23984db5a15050c6477335fdec955b70063bb2d692bf1"}
+{"name": "neg_zero_float", "input": "{\"x\":-0.0}", "sha256": "5bff452c5ed93f2e87a23984db5a15050c6477335fdec955b70063bb2d692bf1"}
+{"name": "plain_decimal", "input": "{\"x\":0.1}", "sha256": "2b018c1708c1cc2f4a8ed7f085c2cc748153117b173f7c076f7d5813bbb50f21"}
+{"name": "half", "input": "{\"x\":0.5}", "sha256": "ad0233224b23c9622ebd084088f2c1647737a4cabad828e4349bbed0d9b42e11"}
+{"name": "surrogate_pair_emoji", "input": "{\"x\":\"\ud83d\ude00\"}", "sha256": "c10cb8a0c573e0eafbed00d33a65f0a83da0cb03445908aed65f7deecc63019e"}
+{"name": "escaped_solidus", "input": "{\"x\":\"\\/\"}", "sha256": "4e1f6444c749458a35a133c1be1fbaee3eb00ee295ed3c0f2b28d84e486087ae"}
+{"name": "noncharacter_ok", "input": "{\"x\":\"\uffff\"}", "sha256": "a4ad7293647eb9d18da9c11151fa5ab9404ad22ed0db34e68ab73555ecf81559"}
+{"name": "bare_string", "input": "\"hi\"", "sha256": "b49177e05868b7af8e82a644c1ce20e521af46497adeaffe861d294d9b4bb75e"}
+{"name": "bare_true", "input": "true", "sha256": "b5bea41b6c623f7c09f1bf24dcae58ebab3c0cdd90ad966bc43a45b44867e12b"}
+{"name": "deep_nest_60", "input": "{\"a\":{\"a\":{\"a\":{\"a\":{\"a\":{\"a\":{\"a\":{\"a\":{\"a\":{\"a\":{\"a\":{\"a\":{\"a\":{\"a\":{\"a\":{\"a\":{\"a\":{\"a\":{\"a\":{\"a\":{\"a\":{\"a\":{\"a\":{\"a\":{\"a\":{\"a\":{\"a\":{\"a\":{\"a\":{\"a\":{\"a\":{\"a\":{\"a\":{\"a\":{\"a\":{\"a\":{\"a\":{\"a\":{\"a\":{\"a\":{\"a\":{\"a\":{\"a\":{\"a\":{\"a\":{\"a\":{\"a\":{\"a\":{\"a\":{\"a\":{\"a\":{\"a\":{\"a\":{\"a\":{\"a\":{\"a\":{\"a\":{\"a\":{\"a\":{\"a\":1}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}", "sha256": "8f86b55fdc801b4c73916389d1f83f057412a6e333132529f2fb44bc192956d0"}
+{"name": "same_key_sibling_objects", "input": "[{\"k\":1},{\"k\":2}]", "sha256": "98fcf287e1991c1602a189793606501715f8ae194db5dcaaf6515ed29937c20d"}
+{"name": "micro_boundary", "input": "{\"x\":0.000001}", "sha256": "2d6412ab0155bb89d63b73dbf83334b26b39d03e8c832cc253c6a6caceba9733"}

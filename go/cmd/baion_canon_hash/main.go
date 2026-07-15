@@ -34,6 +34,21 @@ func main() {
 		os.Exit(1)
 	}
 
+	// Number-domain enforcement is LEXICAL (`100` in-domain, `1e2` rejected),
+	// so it too needs the raw bytes — the decoded tree loses the spelling.
+	if err := baionstd.CheckNumberDomain(input); err != nil {
+		fmt.Fprintf(os.Stderr, "baion_canon_hash: reject: unsupported number in input (%v)\n", err)
+		os.Exit(1)
+	}
+
+	// Lone-surrogate detection needs the raw bytes as well: Go's decoder
+	// silently replaces unpaired surrogates with U+FFFD, destroying the
+	// evidence every sibling lineage rejects on.
+	if err := baionstd.CheckNoLoneSurrogates(input); err != nil {
+		fmt.Fprintf(os.Stderr, "baion_canon_hash: reject: unpaired surrogate escape in input (%v)\n", err)
+		os.Exit(1)
+	}
+
 	// json.Number preserves number spelling so canonicalization — not the
 	// decoder's float64 round-trip — decides the canonical numeric form.
 	dec := json.NewDecoder(bytes.NewReader(input))

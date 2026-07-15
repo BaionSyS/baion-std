@@ -15,63 +15,97 @@ import std.array : Appender, appender;
 import std.conv : to;
 import std.format : format;
 import std.math : isNaN, isInfinity;
+import std.typecons : Nullable;
 
 import baionstd.types : StdError, errorMessage;
 
-// CROSS-LINEAGE CONTRACT: this formatting must produce byte-identical output
-// with Rust's Ryu (serde_json) and C++'s nlohmann::json shortest-round-trip.
-// All lineages must agree on the decimal representation so that
-// canonical JSON and therefore SHA-256 digests match.
+// CROSS-LINEAGE CONTRACT: non-integer floats serialize as the SHORTEST
+// decimal string that roundtrips to the same double (RFC 8785 §3.2.2.3 /
+// ECMA-262 §7.1.12.1), reassembled WITHOUT exponent notation. The
+// number-domain gate guarantees the value is 0 or |v| in [1e-6, 1e21),
+// which is exactly the range where ECMA-262 ToString never takes its
+// exponent branch — so plain positional layout is the canonical spelling.
+// The previous %g-based formatter emitted exponent forms at |v| <= 1e-5
+// (0.00001 → "1e-5") and near the 1e21 top, diverging from the C/Go/OCaml
+// reference lineages and breaking SHA-256 digest parity.
 //
-// WHY: D's %g diverges from Ryu in two ways that must be post-processed:
-//   1. Zero-pads exponents:    5e-08  vs Ryu's 5e-8
-//   2. Includes + sign:        e+15   vs Ryu omits +
-// The %g shortest-search itself matches Ryu for all values in the
-// pipeline's float range.
-/// Iterates %g precision from 1..17 until parse(format(val)) == val,
-/// then normalizes exponent formatting to match Ryu.
+// Locale note: std.format implements float formatting in Phobos (always
+// '.' decimal point) and to!double likewise parses locale-independently,
+// so unlike the C lineage's snprintf/strtod path this code does not
+// depend on the process locale.
+/// Shortest round-trip digits via %e precision search (p = 1..17),
+/// then ECMA-262 §7.1.12.1 plain-decimal reassembly.
 private string formatShortest(double val)
 {
+    // Shortest digits: smallest precision whose %e output parses back
+    // to the identical double.
+    string sci;
     foreach (prec; 1 .. 18)
     {
-        string s = format("%.*g", prec, val);
-        if (to!double(s) == val)
-            return normalizeExponent(s);
+        sci = format("%.*e", prec - 1, val);
+        if (to!double(sci) == val)
+            break;
     }
-    // Fallback: full 17-digit precision (unreachable for finite IEEE-754 doubles)
-    return normalizeExponent(format!"%.17g"(val));
-}
 
-/// Post-process %g output to match Ryu's exponent format.
-/// WHY: D's libc %g zero-pads exponents (5e-08 → 5e-8) and includes
-/// + sign (e+15 → e15). Ryu never does either.
-private string normalizeExponent(string s)
-{
-    import std.string : indexOf;
-
-    auto eIdx = s.indexOf('e');
-    if (eIdx < 0)
-        eIdx = s.indexOf('E');
-    if (eIdx < 0)
-        return s; // No exponent, no fixup needed
-
-    string mantissa = s[0 .. eIdx];
-    string expPart = s[eIdx + 1 .. $];
-
-    // Parse exponent: strip + sign and leading zeros
-    bool negExp = false;
-    size_t ei = 0;
-    if (ei < expPart.length && expPart[ei] == '+')
-        ei++;
-    else if (ei < expPart.length && expPart[ei] == '-')
+    // Pull apart [-]d[.ddd]e±XX into digit string D (mantissa digits,
+    // no dot) and n = exp10 + 1 (count of digits before the decimal
+    // point in positional form). The exponent is parsed numerically:
+    // %e implementations emit 2+ exponent digits and a mandatory sign,
+    // so no fixed width can be assumed.
+    size_t i = 0;
+    bool neg = false;
+    if (sci[i] == '-')
     {
-        negExp = true;
-        ei++;
+        neg = true;
+        i++;
     }
-    while (ei < expPart.length - 1 && expPart[ei] == '0')
-        ei++;
+    auto digitsBuf = appender!string;
+    digitsBuf.put(sci[i]);
+    i++;
+    if (i < sci.length && sci[i] == '.')
+    {
+        i++;
+        while (sci[i] != 'e' && sci[i] != 'E')
+        {
+            digitsBuf.put(sci[i]);
+            i++;
+        }
+    }
+    i++; // skip 'e'; to!int consumes the +/- sign and leading zeros
+    immutable int n = to!int(sci[i .. $]) + 1;
 
-    return mantissa ~ "e" ~ (negExp ? "-" : "") ~ expPart[ei .. $];
+    string digits = digitsBuf[];
+    immutable int dl = cast(int) digits.length;
+
+    string outp;
+    if (dl <= n && n <= 21)
+    {
+        // Integer-valued: all digits then zero-padding, no dot. Covers
+        // integer-valued doubles too large for exact-precision layout
+        // (e.g. 1.000000000000000005e20 rounds to a 21-digit integer).
+        outp = digits;
+        foreach (_; 0 .. n - dl)
+            outp ~= '0';
+    }
+    else if (0 < n && n <= dl)
+    {
+        outp = digits[0 .. n] ~ "." ~ digits[n .. $];
+    }
+    else if (-5 <= n && n <= 0)
+    {
+        outp = "0.";
+        foreach (_; 0 .. -n)
+            outp ~= '0';
+        outp ~= digits;
+    }
+    else
+    {
+        // Only reachable when a caller bypassed the number-domain gate
+        // (programmatic JSONValue with |v| >= 1e21 or nonzero |v| < 1e-6):
+        // emit a best-effort spelling rather than fail. NON-CANONICAL.
+        return format!"%.17g"(val);
+    }
+    return neg ? "-" ~ outp : outp;
 }
 
 /// Convert any JSONValue to canonical JSON string.
@@ -113,13 +147,21 @@ void canonicalizeValue(ref Appender!string buf, const JSONValue v)
         {
             buf.put("null");
         }
+        else if (val == 0)
+        {
+            // CROSS-LINEAGE CONTRACT: any zero — including IEEE-754 negative
+            // zero — serializes as exactly "0" (RFC 8785 §3.2.2.3 via ECMA-262
+            // ToString: "If x is +0 or -0, return \"0\""). D's %g preserves
+            // the sign bit and would emit "-0", diverging from the other
+            // lineages, so zero is short-circuited before formatShortest.
+            buf.put("0");
+        }
         else
         {
             // CROSS-LINEAGE CONTRACT: integer-valued floats serialize without
-            // trailing decimal (RFC 8785 §3.2.2.3 / ECMA-262 §7.1.12.1). The
-            // %g-based formatShortest below performs the shortest-round-trip
-            // search starting at precision 1, so 1.0 → "1", -3.0 → "-3", and
-            // 1.5 → "1.5".
+            // trailing decimal (RFC 8785 §3.2.2.3 / ECMA-262 §7.1.12.1).
+            // formatShortest's precision-1 starting point plus the dl <= n
+            // reassembly branch guarantee 1.0 → "1", -3.0 → "-3", 1.5 → "1.5".
             buf.put(formatShortest(val));
         }
         break;
@@ -249,6 +291,232 @@ bool hasDuplicateKeys(const(char)[] raw)
         }
     }
     return false;
+}
+
+// ── Number-domain enforcement scan ───────────────────────────
+//
+// CROSS-LINEAGE CONTRACT: number tokens are restricted to a lexical
+// domain all 7 lineages accept identically — the check is on the RAW
+// token text, so `100` and `1e2` are distinguished even though they
+// parse to the same value. Rejected (CLI exits 1 mentioning an
+// unsupported number):
+//   1. any token containing exponent notation (`e` / `E`)
+//   2. integer tokens (no `.`) with magnitude beyond ±9007199254740992
+//      (2^53, the IEEE-754 exact-integer bound) — compared as digit
+//      strings, never via double, so 9007199254740993 cannot round
+//      down to a false accept
+//   3. fraction tokens whose value lands where ES ToString would need
+//      exponent form: nonzero |v| < 1e-6 or |v| >= 1e21
+//
+// WHY a raw-input scan and not a post-parse walk: parseJSON has
+// already collapsed `1e2` to 100 and rounded 9007199254740993 by the
+// time a JSONValue exists — the lexical evidence is gone.
+//
+// Precondition: as with hasDuplicateKeys, the input has already been
+// accepted by parseJSON, so tokens are well-formed JSON numbers.
+
+/// Scan raw JSON text for number tokens outside the supported domain.
+/// Returns true if any unsupported number token exists.
+bool hasUnsupportedNumber(const(char)[] raw)
+{
+    size_t i = 0;
+    while (i < raw.length)
+    {
+        char c = raw[i];
+        if (c == '"')
+        {
+            // Digits/'e' inside string literals are not number tokens:
+            // consume the whole literal (decoded text is discarded).
+            decodeJSONString(raw, i);
+            continue;
+        }
+        if (c == '-' || (c >= '0' && c <= '9'))
+        {
+            size_t start = i;
+            // parseJSON already validated the grammar, so a greedy sweep
+            // over number-alphabet chars captures exactly one token.
+            while (i < raw.length && (raw[i] == '-' || raw[i] == '+'
+                    || raw[i] == '.' || raw[i] == 'e' || raw[i] == 'E'
+                    || (raw[i] >= '0' && raw[i] <= '9')))
+                i++;
+            if (numberTokenUnsupported(raw[start .. i]))
+                return true;
+            continue;
+        }
+        i++;
+    }
+    return false;
+}
+
+/// Decide whether one raw number token is outside the supported domain.
+private bool numberTokenUnsupported(const(char)[] tok)
+{
+    import std.conv : to;
+    import std.math : fabs;
+
+    bool hasDot = false;
+    foreach (c; tok)
+    {
+        // Exponent notation is rejected outright — even value-preserving
+        // forms like 1e2 — because canonical output would erase the
+        // distinction and lineages differ in how they re-expand it.
+        if (c == 'e' || c == 'E')
+            return true;
+        if (c == '.')
+            hasDot = true;
+    }
+
+    if (!hasDot)
+    {
+        // Integer token: compare DIGIT STRINGS against 2^53. Converting
+        // to double first would round 9007199254740993 down to the
+        // boundary and wave it through.
+        static immutable string maxSafe = "9007199254740992";
+        const(char)[] digits = tok;
+        if (digits.length && digits[0] == '-')
+            digits = digits[1 .. $];
+        while (digits.length > 1 && digits[0] == '0')
+            digits = digits[1 .. $];
+        if (digits.length > maxSafe.length)
+            return true;
+        if (digits.length == maxSafe.length && digits > maxSafe)
+            return true;
+        return false;
+    }
+
+    // Fraction token: magnitude gate on the parsed value. Outside
+    // [1e-6, 1e21) ES ToString switches to exponent form, which the
+    // supported domain excludes. Zero (any sign) always passes.
+    double v = to!double(tok);
+    return (v != 0 && fabs(v) < 1e-6) || fabs(v) >= 1e21;
+}
+
+// ── Single-document enforcement scan ─────────────────────────
+//
+// CROSS-LINEAGE CONTRACT: stdin must contain EXACTLY ONE complete JSON
+// document, with only leading/trailing whitespace around it. All 7
+// lineages reject empty input, trailing garbage (`{"a":1} x`),
+// concatenated documents (`{"a":1}{"b":2}`) and trailing commas
+// (`{"a":1,}`) — the CLI exits 1 naming the problem.
+//
+// WHY a raw-input scan: std.json's parseJSON stops at the end of the
+// first complete value and silently IGNORES everything after it, and
+// (measured, dmd 2.112.0) also swallows a trailing comma before '}'
+// or ']' — so by the time a JSONValue exists none of these defects
+// are visible. The consuming-range parseJSON overload does not help
+// either: for a char slice it leaves the range untouched rather than
+// advancing past the parsed prefix. This scanner walks the raw text
+// to the end of the first document and checks the remainder is
+// whitespace-only, flagging trailing commas along the way.
+//
+// Precondition: as with the other raw scanners, parseJSON has already
+// accepted the input, so the FIRST document is well-formed; the scan
+// never reads past it except to whitespace-check the remainder.
+
+/// Scan raw JSON text for the exactly-one-document contract.
+/// Returns the violation, or a null Nullable when the input is one
+/// complete document surrounded only by whitespace.
+Nullable!StdError scanSingleDocument(const(char)[] raw)
+{
+    Nullable!StdError err;
+
+    size_t i = 0;
+    while (i < raw.length && isJSONWhitespace(raw[i]))
+        i++;
+    if (i >= raw.length)
+    {
+        err = StdError.emptyInput;
+        return err;
+    }
+
+    char c = raw[i];
+    if (c == '{' || c == '[')
+    {
+        // Structural walk to the matching top-level closer. Strings are
+        // consumed whole so structural bytes inside literals never count.
+        // afterComma tracks whether the last non-whitespace structural
+        // token was ',' — true at a closer means a trailing comma, which
+        // parseJSON accepts but the contract rejects.
+        size_t depth = 0;
+        bool afterComma = false;
+        while (i < raw.length)
+        {
+            char t = raw[i];
+            if (t == '"')
+            {
+                decodeJSONString(raw, i);
+                afterComma = false;
+                continue;
+            }
+            if (t == '{' || t == '[')
+            {
+                depth++;
+                afterComma = false;
+                i++;
+                continue;
+            }
+            if (t == '}' || t == ']')
+            {
+                if (afterComma)
+                {
+                    err = StdError.trailingComma;
+                    return err;
+                }
+                depth--;
+                i++;
+                if (depth == 0)
+                    break;
+                continue;
+            }
+            if (t == ',')
+                afterComma = true;
+            else if (!isJSONWhitespace(t))
+                afterComma = false; // ':' and scalar bytes clear the flag
+            i++;
+        }
+    }
+    else if (c == '"')
+    {
+        decodeJSONString(raw, i);
+    }
+    else if (c == 't')
+    {
+        i += 4; // "true" — exact literal, parseJSON already validated it
+    }
+    else if (c == 'f')
+    {
+        i += 5; // "false"
+    }
+    else if (c == 'n')
+    {
+        i += 4; // "null"
+    }
+    else
+    {
+        // Number token: greedy sweep over the number alphabet, matching
+        // hasUnsupportedNumber. Nonempty for parseJSON-accepted input;
+        // exact token extent matters so `123 456` and `123x` leave their
+        // second chunk behind as trailing data.
+        size_t start = i;
+        while (i < raw.length && (raw[i] == '-' || raw[i] == '+'
+                || raw[i] == '.' || raw[i] == 'e' || raw[i] == 'E'
+                || (raw[i] >= '0' && raw[i] <= '9')))
+            i++;
+        if (i == start)
+            i++; // unreachable for parseJSON-accepted input; keeps the scan advancing
+    }
+
+    while (i < raw.length && isJSONWhitespace(raw[i]))
+        i++;
+    if (i < raw.length)
+        err = StdError.trailingData;
+    return err;
+}
+
+/// RFC 8259 §2 insignificant whitespace: space, tab, LF, CR — nothing else.
+private bool isJSONWhitespace(char c) @safe pure nothrow
+{
+    return c == ' ' || c == '\t' || c == '\n' || c == '\r';
 }
 
 /// Decode one JSON string literal starting at the opening quote.

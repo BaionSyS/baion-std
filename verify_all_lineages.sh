@@ -1,42 +1,24 @@
 #!/usr/bin/env bash
-# BAION STD — Cross-Lineage Byte-Identity Verifier
-# Feeds identical JSON inputs to every lineage's baion_canon_hash CLI and
-# asserts all SEVEN lineages emit the same SHA-256 of the same canonical
-# bytes. A missing CLI is a FAILURE, not a skip: partial participation
-# would let the strongest claim in this repo pass vacuously.
+# BAION STD — Cross-Lineage Byte-Identity Verifier (corpus-driven)
+# Feeds every conformance-corpus input to every lineage's baion_canon_hash CLI.
+# Accept cases must hash to the corpus-PINNED SHA-256 in all SEVEN lineages;
+# reject cases must exit nonzero in all seven. A missing CLI is a FAILURE,
+# not a skip: partial participation would let the strongest claim in this
+# repo pass vacuously.
+#
+# Vectors live in conformance/accept.jsonl + conformance/reject.jsonl (one
+# JSON object per line; inputs are JSON-escaped strings so escape-sensitive
+# bytes — NUL, BOM, lone surrogates — survive text editing losslessly).
+# Regenerate/extend via conformance/gen_corpus.py, which refuses to pin any
+# accept case the seven current CLIs disagree on. This script never invents
+# an expected hash: pins come only from the corpus.
 set -u
 
 HERE="$(cd "$(dirname "$0")" && pwd)"
 LINEAGES=(c cpp rust go d haskell ocaml)
 EXPECTED=${#LINEAGES[@]}
-
-inputs=(
-  '{"b":1,"a":[1,2]}'
-  '{"z":1,"a":"é"}'
-  '{"nested":{"y":[true,false,null],"x":0.5},"empty":{},"arr":[]}'
-  '{"é":1,"e":2,"zß":"straße"}'
-  '{"escapes":"line\nbreak\ttab \"quoted\" back\\slash"}'
-  '{"max_safe":9007199254740992,"neg":-42,"empty":""}'
-  '{"deep":{"a":{"b":{"c":[1,{"d":[]}]}}}}'
-  '{"x":1.0}'
-  '1.0'
-  '{"x":"a\\u0000b"}'
-)
-
-# Inputs every lineage must UNIFORMLY REJECT (nonzero exit).
-# U+0000: outside the supported domain because one lineage cannot represent it losslessly —
-# accepting it anywhere would allow silent canonicalization collisions.
-# Duplicate object keys: RFC 8259 leaves duplicate-name behavior undefined and the seven
-# ecosystems genuinely diverge (keep-first / keep-last / keep-both), so member names must
-# be unique; duplicates compare on the DECODED name (third duplicate vector spells the
-# same key as an escape).
-reject_inputs=(
-  '{"x":"a\u0000b"}'
-  '{"a\u0000":1}'
-  '{"a":1,"a":2}'
-  '{"x":{"b":1,"b":2}}'
-  '{"a":1,"\u0061":2}'
-)
+ACCEPT="$HERE/conformance/accept.jsonl"
+REJECT="$HERE/conformance/reject.jsonl"
 
 fail=0
 missing=0
@@ -46,25 +28,49 @@ for L in "${LINEAGES[@]}"; do
     missing=1
   fi
 done
+for f in "$ACCEPT" "$REJECT"; do
+  if [ ! -f "$f" ]; then
+    echo "MISSING corpus file $f (run conformance/gen_corpus.py)"
+    missing=1
+  fi
+done
 if [ "$missing" -ne 0 ]; then
-  echo "FAIL: all $EXPECTED lineages must be built before verification"
+  echo "FAIL: all $EXPECTED lineages and both corpus files are required"
   exit 1
 fi
 
-for i in "${!inputs[@]}"; do
-  ref=""
-  echo "input $i: ${inputs[$i]}"
+# Decode each corpus row to "name<TAB>base64(input-bytes)<TAB>sha256" — base64
+# because the raw input bytes may contain NUL/BOM, which bash variables and
+# command substitution cannot carry.
+corpus_rows() {
+  python3 - "$1" <<'PY'
+import base64, json, sys
+for line in open(sys.argv[1], encoding="utf-8"):
+    line = line.strip()
+    if not line:
+        continue
+    row = json.loads(line)
+    payload = base64.b64encode(row["input"].encode("utf-8")).decode("ascii")
+    print(f'{row["name"]}\t{payload}\t{row.get("sha256", "")}')
+PY
+}
+
+# Accept pass: pinned-hash agreement across all seven lineages.
+n_accept=0
+while IFS=$'\t' read -r name b64 pin; do
+  n_accept=$((n_accept + 1))
+  echo "accept: $name"
   for L in "${LINEAGES[@]}"; do
-    h="$(printf '%s' "${inputs[$i]}" | "$HERE/$L/bin/baion_canon_hash")" || { echo "  ERROR $L exited nonzero"; fail=1; continue; }
-    [ -z "$ref" ] && ref="$h"
-    if [ "$h" = "$ref" ]; then
+    h="$(printf '%s' "$b64" | base64 -d | "$HERE/$L/bin/baion_canon_hash")" \
+      || { echo "  ERROR $L exited nonzero"; fail=1; continue; }
+    if [ "$h" = "$pin" ]; then
       printf '  MATCH %-8s %s\n' "$L" "$h"
     else
-      printf '  DIFF  %-8s %s\n' "$L" "$h"
+      printf '  DIFF  %-8s %s (pinned %s)\n' "$L" "$h" "$pin"
       fail=1
     fi
   done
-done
+done < <(corpus_rows "$ACCEPT")
 
 # Fixture file pass — the full cross-lineage conformance reference.
 ref=""
@@ -75,21 +81,29 @@ for L in "${LINEAGES[@]}"; do
   if [ "$h" = "$ref" ]; then printf '  MATCH %-8s %s\n' "$L" "$h"; else printf '  DIFF  %-8s %s\n' "$L" "$h"; fail=1; fi
 done
 
-# Uniform-rejection pass: every lineage must refuse these with nonzero exit.
-for i in "${!reject_inputs[@]}"; do
-  echo "reject $i: ${reject_inputs[$i]}"
+# Reject pass: every lineage must refuse these with nonzero exit. Reasons are
+# documented per-row in reject.jsonl.
+n_reject=0
+while IFS=$'\t' read -r name b64 _; do
+  n_reject=$((n_reject + 1))
+  echo "reject: $name"
   for L in "${LINEAGES[@]}"; do
-    if printf '%s' "${reject_inputs[$i]}" | "$HERE/$L/bin/baion_canon_hash" >/dev/null 2>&1; then
+    if printf '%s' "$b64" | base64 -d | "$HERE/$L/bin/baion_canon_hash" >/dev/null 2>&1; then
       printf '  BAD   %-8s accepted input it must reject\n' "$L"
       fail=1
     else
       printf '  REJECT %-7s ok\n' "$L"
     fi
   done
-done
+done < <(corpus_rows "$REJECT")
+
+if [ "$n_accept" -eq 0 ] || [ "$n_reject" -eq 0 ]; then
+  echo "FAIL: corpus is empty (accept=$n_accept reject=$n_reject) — refusing a vacuous pass"
+  fail=1
+fi
 
 if [ "$fail" -eq 0 ]; then
-  echo "PASS: $EXPECTED/$EXPECTED lineages produced identical output"
+  echo "PASS: $EXPECTED/$EXPECTED lineages agree on $n_accept accept + $n_reject reject vectors"
 else
   echo "FAIL: byte-identity failure"
 fi

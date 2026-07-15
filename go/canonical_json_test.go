@@ -2,6 +2,7 @@ package baionstd
 
 import (
 	"encoding/json"
+	"math"
 	"strings"
 	"testing"
 )
@@ -209,6 +210,129 @@ func TestCanonicalJSON_DuplicateKeyRejection(t *testing.T) {
 		t.Run("accept_"+tt.name, func(t *testing.T) {
 			if err := CheckNoDuplicateKeys([]byte(tt.input)); err != nil {
 				t.Errorf("input %q: want nil, got %v", tt.input, err)
+			}
+		})
+	}
+}
+
+// Number-domain rejection contract: the check is lexical on the raw token —
+// `100` is in-domain, `1E2` is rejected even though the values are equal.
+// Domain: no exponent spelling, integers within ±2^53, fractions in [1e-6, 1e21).
+func TestCanonicalJSON_NumberDomainRejection(t *testing.T) {
+	rejects := []struct {
+		name  string
+		input string
+	}{
+		{"exponent_lower", `{"x":1e5}`},
+		{"exponent_upper", `{"x":1E2}`},
+		{"exponent_large", `{"x":1e21}`},
+		{"exponent_negative", `{"x":1e-7}`},
+		{"exponent_overflow", `{"x":1e400}`},
+		{"exponent_bare", `1e0`},
+		{"int_beyond_2p53", `{"x":9007199254740993}`},
+		{"int_beyond_2p53_negative", `{"x":-9007199254740993}`},
+		{"int_much_wider_than_int64", `{"x":99999999999999999999999999}`},
+		{"fraction_below_1e_minus_6", `{"x":0.0000001}`},
+		{"fraction_at_or_above_1e21", `{"x":1000000000000000000000.5}`},
+		{"nested_in_array", `{"a":[1,2,1e2]}`},
+	}
+	for _, tt := range rejects {
+		t.Run("reject_"+tt.name, func(t *testing.T) {
+			if err := CheckNumberDomain([]byte(tt.input)); err != ErrUnsupportedNumber {
+				t.Errorf("input %q: want ErrUnsupportedNumber, got %v", tt.input, err)
+			}
+		})
+	}
+
+	accepts := []struct {
+		name  string
+		input string
+	}{
+		{"plain_int", `{"x":100}`},
+		{"max_safe_int", `{"x":9007199254740992}`},
+		{"min_safe_int", `{"x":-9007199254740992}`},
+		{"fraction_at_1e_minus_6", `{"x":0.000001}`},
+		{"fraction_plain", `{"x":0.1}`},
+		{"negative_zero_fraction", `{"x":-0.0}`},
+		{"zero", `{"x":0}`},
+		{"bare_fraction", `1.5`},
+	}
+	for _, tt := range accepts {
+		t.Run("accept_"+tt.name, func(t *testing.T) {
+			if err := CheckNumberDomain([]byte(tt.input)); err != nil {
+				t.Errorf("input %q: want nil, got %v", tt.input, err)
+			}
+		})
+	}
+}
+
+// Lone-surrogate rejection contract: an unpaired \uD800–\uDFFF escape in the
+// raw input is rejected; a literal backslash followed by the text "ud800"
+// (backslash-run parity even) and properly paired surrogates pass. Detection
+// must be on raw bytes — Go's decoder replaces lone surrogates with U+FFFD.
+func TestCanonicalJSON_LoneSurrogateRejection(t *testing.T) {
+	rejects := []struct {
+		name  string
+		input string
+	}{
+		{"lone_high", `{"x":"\ud800"}`},
+		{"lone_high_upper", `{"x":"\uD800"}`},
+		{"lone_low", `{"x":"\udc00"}`},
+		{"high_then_non_surrogate_escape", `{"x":"\ud800\n"}`},
+		{"high_then_literal_text", `{"x":"\ud800abc"}`},
+		{"high_at_end_of_input", `{"x":"\ud800`},
+		{"literal_backslash_then_lone_high", `{"x":"\\\ud800"}`}, // run of 3: literal backslash + active lone escape
+		{"low_before_high", `{"x":"\udc00\ud800"}`},
+	}
+	for _, tt := range rejects {
+		t.Run("reject_"+tt.name, func(t *testing.T) {
+			if err := CheckNoLoneSurrogates([]byte(tt.input)); err != ErrLoneSurrogate {
+				t.Errorf("input %q: want ErrLoneSurrogate, got %v", tt.input, err)
+			}
+		})
+	}
+
+	accepts := []struct {
+		name  string
+		input string
+	}{
+		{"literal_backslash_ud800", `{"x":"\\ud800"}`}, // even run: literal backslash + text
+		{"double_literal_backslash_ud800", `{"x":"\\\\ud800"}`},
+		{"paired_surrogates", `{"x":"\ud83d\ude00"}`},
+		{"paired_surrogates_upper", `{"x":"\uD83D\uDE00"}`},
+		{"raw_utf8_emoji", `{"x":"` + "\U0001F600" + `"}`},
+		{"non_surrogate_escape", `{"x":"\u0041"}`},
+		{"plain_string", `{"x":"hello"}`},
+	}
+	for _, tt := range accepts {
+		t.Run("accept_"+tt.name, func(t *testing.T) {
+			if err := CheckNoLoneSurrogates([]byte(tt.input)); err != nil {
+				t.Errorf("input %q: want nil, got %v", tt.input, err)
+			}
+		})
+	}
+}
+
+// Negative-zero contract: any zero value emits exactly "0" (RFC 8785 / ES
+// ToString) — both the fraction spelling -0.0 (float path) and the integer
+// spelling -0 (int64 path).
+func TestCanonicalJSON_NegativeZero(t *testing.T) {
+	tests := []struct {
+		name string
+		val  interface{}
+		want string
+	}{
+		{"neg_zero_fraction_token", json.Number("-0.0"), "0"},
+		{"neg_zero_int_token", json.Number("-0"), "0"},
+		{"pos_zero_fraction_token", json.Number("0.0"), "0"},
+		{"neg_zero_float64", math.Copysign(0, -1), "0"},
+		{"in_object", map[string]interface{}{"x": json.Number("-0.0")}, `{"x":0}`},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			got := CanonicalizeJSON(tt.val)
+			if got != tt.want {
+				t.Errorf("value %v (%T)\nwant: %s\ngot:  %s", tt.val, tt.val, tt.want, got)
 			}
 		})
 	}

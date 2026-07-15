@@ -43,7 +43,7 @@ TEST(CanonicalJSON, MinimalStringEscaping)
 
     // Forward slash is NOT escaped (minimal escaping)
     EXPECT_NE(result.find("just ascii / and more"), std::string::npos);
-    // Control char 0x01 escaped as 
+    // Control char 0x01 escaped as the six-character text \u0001
     EXPECT_NE(result.find("\\u0001"), std::string::npos);
     // Quote escaped
     EXPECT_NE(result.find("\\\"hello\\\""), std::string::npos);
@@ -187,6 +187,88 @@ TEST(CanonicalJSON, AllowsDistinctKeys)
     EXPECT_FALSE(has_duplicate_keys("{\"a\":{\"a\":1},\"b\":{\"a\":2}}"));
 }
 
+// ── Number-domain rejection: exponent spelling is lexical ─────
+// 100 and 1e2 denote the same value; the contract rejects the
+// exponent SPELLING, so the check must see the raw token — the
+// SAX number_float callback delivers it.
+TEST(CanonicalJSON, RejectsExponentNotation)
+{
+    EXPECT_TRUE(has_unsupported_number("{\"x\":1e2}"));
+    EXPECT_TRUE(has_unsupported_number("{\"x\":1E5}"));
+    EXPECT_TRUE(has_unsupported_number("{\"x\":1e-7}"));
+    EXPECT_TRUE(has_unsupported_number("{\"x\":2.5E+3}"));
+    // Same value, integer spelling — accepted.
+    EXPECT_FALSE(has_unsupported_number("{\"x\":100}"));
+}
+
+// ── Number-domain rejection: integers beyond +/-2^53 ──────────
+// 9007199254740992 (2^53) is the last integer every lineage's
+// double holds exactly; one past it in either direction is out.
+// The comparison is int64/uint64-exact — no float rounding.
+TEST(CanonicalJSON, RejectsIntegersBeyondSafeRange)
+{
+    EXPECT_TRUE(has_unsupported_number("{\"x\":9007199254740993}"));
+    EXPECT_TRUE(has_unsupported_number("{\"x\":-9007199254740993}"));
+    EXPECT_FALSE(has_unsupported_number("{\"x\":9007199254740992}"));
+    EXPECT_FALSE(has_unsupported_number("{\"x\":-9007199254740992}"));
+}
+
+// ── Number-domain rejection: integers past uint64 ──────────────
+// nlohmann routes integers that overflow 64 bits to number_float,
+// bypassing the integer callbacks — the scanner must recognize a
+// dotless raw token as an integer and judge it by digit string,
+// not by the fraction magnitude window (1e20 < 1e21 would pass).
+TEST(CanonicalJSON, RejectsIntegersBeyondUint64)
+{
+    EXPECT_TRUE(has_unsupported_number(
+        "{\"x\":100000000000000000000}"));
+    EXPECT_TRUE(has_unsupported_number(
+        "{\"x\":-100000000000000000000}"));
+    // 2^64 + 1: just past uint64, well past 2^53.
+    EXPECT_TRUE(has_unsupported_number(
+        "{\"x\":18446744073709551617}"));
+    // A genuine fraction token (has '.') near the top of the window
+    // stays on the existing magnitude check and remains accepted.
+    EXPECT_FALSE(has_unsupported_number(
+        "{\"x\":100000000000000000000.5}"));
+}
+
+// ── Number-domain rejection: out-of-range fractions ───────────
+// Below 1e-6 (nonzero) or at/above 1e21 lineage formatters flip
+// to scientific notation and diverge; the domain excludes them.
+TEST(CanonicalJSON, RejectsOutOfRangeFractions)
+{
+    EXPECT_TRUE(has_unsupported_number("{\"x\":0.0000001}"));
+    // Boundary stays in: exactly 1e-6 written plainly is supported.
+    EXPECT_FALSE(has_unsupported_number("{\"x\":0.000001}"));
+    EXPECT_FALSE(has_unsupported_number("{\"x\":0.1}"));
+    EXPECT_FALSE(has_unsupported_number("{\"x\":0.0}"));
+    EXPECT_FALSE(has_unsupported_number("{\"x\":-0.0}"));
+}
+
+// ── Number-domain rejection: bad number at depth ──────────────
+TEST(CanonicalJSON, RejectsUnsupportedNumberAtDepth)
+{
+    EXPECT_TRUE(has_unsupported_number("{\"a\":[1,{\"b\":[2,1e2]}]}"));
+    EXPECT_FALSE(has_unsupported_number(
+        "{\"nested\":{\"y\":[true,false,null],\"x\":0.5},\"arr\":[]}"));
+}
+
+// ── UTF-8 BOM rejection: leading BOM caught, elsewhere ignored ─
+// RFC 8259 §8.1 forbids adding a BOM; nlohmann would silently skip
+// it, so the raw-byte check must fire before any parse.
+TEST(CanonicalJSON, RejectsLeadingUtf8Bom)
+{
+    EXPECT_TRUE(has_utf8_bom("\xEF\xBB\xBF{\"a\":1}"));
+    EXPECT_TRUE(has_utf8_bom("\xEF\xBB\xBF"));
+    EXPECT_FALSE(has_utf8_bom("{\"a\":1}"));
+    // Too short to hold a BOM, and prefixes of one are not a BOM.
+    EXPECT_FALSE(has_utf8_bom(""));
+    EXPECT_FALSE(has_utf8_bom("\xEF\xBB"));
+    // BOM bytes past position 0 are ordinary content for the parser.
+    EXPECT_FALSE(has_utf8_bom(" \xEF\xBB\xBF"));
+}
+
 // ── Checked path matches unchecked path on clean input ────────
 TEST(CanonicalJSON, CheckedMatchesUncheckedOnCleanInput)
 {
@@ -221,4 +303,45 @@ TEST(CanonicalJSON, IntegerValuedFloats)
     std::string expected = "{\"frac\":1.5,\"neg\":-7,\"vals\":[1,2,3]}";
 
     EXPECT_EQ(result, expected);
+}
+
+// ── Floats: shortest round-trip digits, plain positional layout ──
+// Each case: shortest decimal string that roundtrips to the same double,
+// reassembled WITHOUT exponent notation, per RFC 8785 / ECMA-262
+// §7.1.12.1. The old nlohmann dump() path printed 0.00001 as "1e-05"
+// and 1e20-scale values as "1e+20", diverging from every other lineage.
+TEST(CanonicalJSON, FloatShortestRoundtripPlainDecimal)
+{
+    static const struct
+    {
+        double v;
+        const char* expect;
+    } cases[] = {
+        {0.1, "0.1"},
+        {123.456, "123.456"},
+        {0.5, "0.5"},
+        {0.001, "0.001"},
+        {0.0001, "0.0001"},
+        {0.000123, "0.000123"},
+        {0.00001, "0.00001"},
+        {0.000001, "0.000001"}, // n = -5 boundary: "0." + 5 zeros + D
+        {1e16, "10000000000000000"}, // dl < n: zero-padded, no dot
+        {9007199254740992.0,
+         "9007199254740992"}, // 2^53: above the int64 branch cutoff
+        // 1e20 + 0.5 rounds to the 21-digit integer double 1e20: exercises
+        // the n = 21 top of the zero-padding branch (domain ceiling).
+        {100000000000000000000.5, "100000000000000000000"},
+        {-2.5, "-2.5"},
+        {-0.375, "-0.375"},
+        {1.0, "1"},  // integer-valued keeps no-trailing-".0" behavior
+        {-0.0, "0"}, // zero (incl. negative zero) always emits exactly "0"
+    };
+
+    for (const auto& c : cases)
+    {
+        nlohmann::json n = c.v;
+        ASSERT_TRUE(n.is_number_float())
+            << "case must be float-tagged: " << c.expect;
+        EXPECT_EQ(canonicalize_json(n), c.expect);
+    }
 }

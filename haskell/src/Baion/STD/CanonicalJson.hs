@@ -2,12 +2,13 @@
 
 -- | BAION canonical JSON for Haskell — public standalone library.
 -- Deterministic canonicalization of arbitrary JSON values
--- (RFC 8785-style: sorted object keys, minimal escapes, shortest
--- round-tripping number formatting).
+-- (RFC 8785-style: sorted object keys, minimal escapes, ECMAScript
+-- ToString plain-decimal number formatting over double semantics).
 module Baion.STD.CanonicalJson
   ( canonicalizeJson,
     canonicalizeJsonChecked,
     checkNoDuplicateKeys,
+    checkNumberDomain,
     writeJsonString,
   )
 where
@@ -22,12 +23,13 @@ import Data.Aeson.Decoding.Tokens
 import qualified Data.Aeson.Key as AK
 import qualified Data.Aeson.KeyMap as AKM
 import qualified Data.ByteString as BS
-import Data.Char (ord)
+import Data.Char (intToDigit, ord)
 import qualified Data.Map.Strict as Map
 import qualified Data.Scientific as S
 import qualified Data.Set as Set
 import qualified Data.Text as T
 import qualified Data.Vector as V
+import Numeric (floatToDigits)
 import Text.Printf (printf)
 
 canonicalizeJson :: A.Value -> String
@@ -92,6 +94,96 @@ checkNoDuplicateKeys bs = case scanTokens (bsToTokens bs) of
     scanRecord _ (TkRecordEnd k) = Right (Just k)
     scanRecord _ (TkRecordErr _) = Right Nothing
 
+-- | Reject number tokens outside the cross-lineage number domain.
+-- This must scan the RAW input: aeson decodes every number spelling
+-- into 'S.Scientific', so by the time a 'A.Value' exists the lexical
+-- distinction between @100@ and @1e2@ is gone — and the contract is
+-- lexical (exponent SPELLING is rejected even when the value is safe).
+-- Sibling of 'checkNoDuplicateKeys': a linear pass over the raw bytes
+-- that skips string literals escape-aware; outside strings, a digit or
+-- @-@ can only begin a number token in well-formed JSON (the CLI runs
+-- this only after a successful strict decode), so the maximal run of
+-- number-token bytes IS the token.
+-- CROSS-LINEAGE CONTRACT: all 7 lineages reject identically:
+--   * any exponent spelling (e/E), regardless of value;
+--   * integer tokens (no @.@) beyond +/-9007199254740992, compared as
+--     digit strings so 9007199254740993 is caught despite rounding to
+--     a representable Double;
+--   * fraction tokens whose Double value v has
+--     (v /= 0 && abs v < 1e-6) || abs v >= 1e21.
+checkNumberDomain :: BS.ByteString -> Either String ()
+checkNumberDomain = goTop
+  where
+    goTop bs = case BS.uncons bs of
+      Nothing -> Right ()
+      Just (c, rest)
+        | c == 0x22 -> goTop (skipString rest) -- '"'
+        | isNumStart c ->
+            let (tok, rest') = BS.span isNumByte bs
+             in checkToken (map (toEnum . fromIntegral) (BS.unpack tok))
+                  >> goTop rest'
+        | otherwise -> goTop rest
+
+    isNumStart c = c == 0x2d || (c >= 0x30 && c <= 0x39) -- '-' / digit
+    isNumByte c =
+      (c >= 0x30 && c <= 0x39) -- digit
+        || c == 0x2d -- '-'
+        || c == 0x2b -- '+'
+        || c == 0x2e -- '.'
+        || c == 0x65 -- 'e'
+        || c == 0x45 -- 'E'
+
+    -- Inside a string literal: any backslash consumes the next byte
+    -- (enough to keep \" from ending the scan; multi-byte UTF-8 never
+    -- contains 0x22/0x5c continuation bytes, so byte-wise is safe).
+    skipString bs = case BS.uncons bs of
+      Nothing -> BS.empty
+      Just (c, rest)
+        | c == 0x5c -> skipString (BS.drop 1 rest) -- '\\'
+        | c == 0x22 -> rest -- closing '"'
+        | otherwise -> skipString rest
+
+    checkToken :: String -> Either String ()
+    checkToken s
+      | any (\c -> c == 'e' || c == 'E') s =
+          Left
+            ( "unsupported number "
+                ++ show s
+                ++ ": scientific (exponent) notation is outside the"
+                ++ " cross-lineage number contract"
+            )
+      | '.' `elem` s = case reads s :: [(Double, String)] of
+          [(v, "")]
+            | (v /= 0 && abs v < 1e-6) || abs v >= 1e21 ->
+                Left
+                  ( "unsupported number "
+                      ++ show s
+                      ++ ": fraction magnitude outside the cross-lineage"
+                      ++ " range [1e-6, 1e21)"
+                  )
+            | otherwise -> Right ()
+          -- Unreachable after a successful strict decode; reject rather
+          -- than let an unparseable spelling reach the digest.
+          _ -> Left ("unsupported number " ++ show s ++ ": unparseable token")
+      | otherwise =
+          -- Integer token: digit-string comparison, never floats —
+          -- 9007199254740993 rounds to a representable Double and
+          -- would slip through a numeric compare.
+          let digits = dropWhile (== '-') s
+              maxSafe = "9007199254740992"
+              beyond =
+                length digits > length maxSafe
+                  || (length digits == length maxSafe && digits > maxSafe)
+           in if beyond
+                then
+                  Left
+                    ( "unsupported number "
+                        ++ show s
+                        ++ ": integer beyond +/-9007199254740992"
+                        ++ " (cross-lineage safe-integer bound)"
+                    )
+                else Right ()
+
 -- | Recursive walk: does any string (key or value) contain U+0000?
 containsNul :: A.Value -> Bool
 containsNul (A.String t) = T.any (== '\NUL') t
@@ -127,33 +219,51 @@ canonicalizeValue (A.Object obj) =
           ]
         ++ "}"
 
--- | Show a Double in canonical-JSON form per RFC 8785 / ECMA-262
--- §7.1.12.1. Integer-valued doubles emit without trailing decimal.
--- Fractional doubles use the shortest precision that round-trips
--- exactly (mirrors the D lineage's formatShortest's %g shortest-search loop;
--- prevents printf "%.17g" from padding 1.5 → "1.50000000000000000",
--- which was the pre-2026-05-04 Haskell divergence).
+-- | Show a Double in canonical-JSON form per ECMA-262 §7.1.12.1
+-- (Number::toString radix 10), plain decimal only — the reference
+-- rendering shared by the C/Go/OCaml lineages. The previous %g
+-- shortest-search loop switched to scientific notation below 0.01
+-- and near 1e21 ("1.0e-3"), which diverged from the reference for
+-- every fraction in those bands (fixed 2026-07-15).
+-- 'Numeric.floatToDigits' 10 yields exactly the minimal (shortest
+-- round-tripping) digit string ES-262 specifies, with no trailing
+-- zeros, so reassembly is pure positional bookkeeping.
+-- CROSS-LINEAGE CONTRACT: byte-identical to ECMAScript ToString for
+-- doubles inside the gated fraction domain [1e-6, 1e21).
 showDouble :: Double -> String
 showDouble d
   | isNaN d || isInfinite d = "null"
-  | d == fromInteger (round d) && abs d < 1e15 =
-      show (round d :: Integer)
-  | otherwise = shortestRoundTrip d
+  | d == 0 = "0" -- ES-262: ToString of +0 AND -0 is "0"
+  | d < 0 = '-' : positiveToString (negate d)
+  | otherwise = positiveToString d
 
--- | Search for the smallest precision whose %g formatting round-trips
--- back to the original Double. CROSS-LINEAGE CONTRACT: behavior must
--- match formatShortest in `d/source/baionstd/canonical_json.d`.
-shortestRoundTrip :: Double -> String
-shortestRoundTrip d = go (1 :: Int)
+-- ES-262 notation: value = D × 10^(n − k) with D the minimal digit
+-- string and k = length D. floatToDigits 10 x = (digits, e) means
+-- x = 0.D × 10^e = D × 10^(e − k), so n = e directly.
+positiveToString :: Double -> String
+positiveToString d =
+  let (ds, n) = floatToDigits 10 d
+   in assembleEs262 (map intToDigit ds) n
+
+assembleEs262 :: String -> Int -> String
+assembleEs262 ds n
+  | k <= n && n <= 21 = ds ++ replicate (n - k) '0'
+  | 0 < n && n <= k = take n ds ++ "." ++ drop n ds
+  | (-5) <= n && n <= 0 = "0." ++ replicate (negate n) '0' ++ ds
+  -- NON-CANONICAL defensive fallback: the number-domain gate pins
+  -- |v| inside [1e-6, 1e21), so ES-262's exponent branches are
+  -- unreachable through the CLI; emit the ES-262 exponent form
+  -- rather than crash if a library caller bypasses the gate.
+  | otherwise =
+      let mantissa = case ds of
+            [c] -> [c]
+            (c : rest) -> c : '.' : rest
+            [] -> "0"
+          e = n - 1
+          sign = if e >= 0 then "+" else ""
+       in mantissa ++ "e" ++ sign ++ show e
   where
-    go p
-      | p > 17 = printf "%.17g" d -- fallback (unreachable for finite IEEE-754)
-      | (readMaybe (printf "%.*g" p d) :: Maybe Double) == Just d =
-          printf "%.*g" p d
-      | otherwise = go (p + 1)
-    readMaybe s = case reads s of
-      [(x, "")] -> Just x
-      _ -> Nothing
+    k = length ds
 
 commaJoin :: [String] -> String
 commaJoin [] = ""

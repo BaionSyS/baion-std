@@ -20,35 +20,35 @@ jobs:
       matrix:
         lineage: [c, cpp, rust, go, d, haskell, ocaml]
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
 
       - name: Set up Go
         if: matrix.lineage == 'go'
-        uses: actions/setup-go@v5
+        uses: actions/setup-go@924ae3a1cded613372ab5595356fb5720e22ba16 # v6.5.0
         with:
           go-version: '1.22'
           cache-dependency-path: go/go.mod
 
       - name: Set up Rust
         if: matrix.lineage == 'rust'
-        uses: dtolnay/rust-toolchain@stable
+        uses: dtolnay/rust-toolchain@4be7066ada62dd38de10e7b70166bc74ed198c30 # stable (2026-07-15)
 
       - name: Set up D
         if: matrix.lineage == 'd'
-        uses: dlang-community/setup-dlang@v2
+        uses: dlang-community/setup-dlang@d7d85fcde7c4cd5f9a6618fce1bccc316e1e910b # v2
         with:
           compiler: dmd-latest
 
       - name: Set up Haskell
         if: matrix.lineage == 'haskell'
-        uses: haskell-actions/setup@v2
+        uses: haskell-actions/setup@cd0d9bdd65b20557f41bea4dbe43d0b5fbbfe553 # v2.11.0
         with:
           ghc-version: '9.6'
           cabal-version: 'latest'
 
       - name: Set up OCaml
         if: matrix.lineage == 'ocaml'
-        uses: ocaml/setup-ocaml@v3
+        uses: ocaml/setup-ocaml@15d660006c1d3110d77c34b7faa3bddefe8b82f0 # v3.7.0
         with:
           ocaml-compiler: '5.2'
 
@@ -109,7 +109,7 @@ jobs:
           test -x "${{ matrix.lineage }}/bin/baion_canon_hash"
           printf '%s' '{"b":1,"a":[1,2]}' | "${{ matrix.lineage }}/bin/baion_canon_hash"
 
-      - uses: actions/upload-artifact@v4
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
         with:
           name: cli-${{ matrix.lineage }}
           path: ${{ matrix.lineage }}/bin/baion_canon_hash
@@ -120,9 +120,9 @@ jobs:
     needs: build
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
 
-      - uses: actions/download-artifact@v4
+      - uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
         with:
           pattern: cli-*
 
@@ -138,3 +138,8 @@ jobs:
 
       - name: Run cross-lineage verifier
         run: ./verify_all_lineages.sh
+
+      # Agreement-only sweep over generated danger-zone cases: any
+      # accept/reject split or hash split across the seven CLIs fails.
+      - name: Run differential probe
+        run: python3 conformance/differential_probe.py

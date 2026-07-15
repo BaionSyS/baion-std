@@ -1,6 +1,6 @@
 [package]
 name = "baion_std"
-version = "0.1.0"
+version = "0.2.0"
 edition = "2021"
 description = "BAION canonical JSON + SHA-256 for Rust — public standalone library"
 license = "MIT"

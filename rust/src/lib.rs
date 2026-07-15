@@ -6,3 +6,4 @@
 pub mod canonical_json;
 pub mod dup_check;
 pub mod hash;
+pub mod num_check;

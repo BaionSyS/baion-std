@@ -90,8 +90,110 @@ conformanceTests =
       testCase "Test 13: distinct keys sharing a prefix accepted" $
         assertNoDuplicate "{\"aa\":1,\"ab\":2}",
       testCase "Test 14: repeated array values are not duplicate keys" $
-        assertNoDuplicate "{\"b\":1,\"a\":[1,2]}"
+        assertNoDuplicate "{\"b\":1,\"a\":[1,2]}",
+      testCase "Test 15: strict decode rejects trailing garbage" $
+        assertDecodeRejected "{\"a\":1} x",
+      testCase "Test 16: strict decode rejects a second document" $
+        assertDecodeRejected "{\"a\":1}{\"b\":2}",
+      testCase "Test 17: strict decode rejects a trailing comma" $
+        assertDecodeRejected "{\"a\":1,}",
+      testCase "Test 18: strict decode rejects empty input" $
+        assertDecodeRejected "",
+      testCase "Test 19: strict decode allows trailing whitespace" $
+        assertDecodeAccepted "{\"a\":1} \n\t",
+      testCase "Test 20: exponent-spelled number rejected (1E2 vs 100)" $ do
+        assertNumberRejected "{\"x\":1E2}"
+        assertNumberRejected "{\"x\":1e5}"
+        assertNumberAccepted "{\"x\":100}",
+      testCase "Test 21: exponent spelling rejected regardless of value" $ do
+        assertNumberRejected "{\"x\":1e21}"
+        assertNumberRejected "{\"x\":1e-7}"
+        assertNumberRejected "{\"x\":1e400}",
+      testCase "Test 22: integer beyond +9007199254740992 rejected" $ do
+        assertNumberRejected "{\"x\":9007199254740993}"
+        assertNumberAccepted "{\"x\":9007199254740992}",
+      testCase "Test 23: integer beyond -9007199254740992 rejected" $ do
+        assertNumberRejected "{\"x\":-9007199254740993}"
+        assertNumberAccepted "{\"x\":-9007199254740992}",
+      testCase "Test 24: fraction below 1e-6 rejected, boundary kept" $ do
+        assertNumberRejected "{\"x\":0.0000001}"
+        assertNumberAccepted "{\"x\":0.000001}"
+        assertNumberAccepted "{\"x\":0.1}"
+        assertNumberAccepted "{\"x\":-0.0}",
+      testCase "Test 25: exponent-like spellings inside strings pass" $ do
+        assertNumberAccepted "{\"x\":\"1e21\"}"
+        assertNumberAccepted "{\"x\":\"a\\\"1E5\",\"y\":100}",
+      testCase "Test 26: sub-0.01 fractions emit plain decimal, never exponent" $ do
+        assertCanonicalizes "{\"x\":0.001}" "{\"x\":0.001}"
+        assertCanonicalizes "{\"x\":0.0001}" "{\"x\":0.0001}"
+        assertCanonicalizes "{\"x\":0.000123}" "{\"x\":0.000123}"
+        assertCanonicalizes "{\"x\":0.00001}" "{\"x\":0.00001}"
+        assertCanonicalizes "{\"x\":0.000001}" "{\"x\":0.000001}",
+      testCase "Test 27: fraction near 1e21 collapses to 21-digit integer via double" $
+        assertCanonicalizes
+          "{\"x\":100000000000000000000.5}"
+          "{\"x\":100000000000000000000}",
+      testCase "Test 28: integer tokens keep plain-integer printing" $ do
+        assertCanonicalizes "{\"x\":9007199254740992}" "{\"x\":9007199254740992}"
+        assertCanonicalizes "{\"x\":-42}" "{\"x\":-42}"
+        assertCanonicalizes "{\"x\":0}" "{\"x\":0}",
+      testCase "Test 29: signed zero and mid-range fractions unchanged" $ do
+        assertCanonicalizes "{\"x\":-0.0}" "{\"x\":0}"
+        assertCanonicalizes "{\"x\":-0.375}" "{\"x\":-0.375}"
+        assertCanonicalizes "{\"x\":0.1}" "{\"x\":0.1}"
+        assertCanonicalizes "{\"x\":123.456}" "{\"x\":123.456}"
+        assertCanonicalizes "{\"x\":1.5}" "{\"x\":1.5}"
+        assertCanonicalizes "{\"x\":1.0}" "{\"x\":1}"
     ]
+
+-- STRICT single-document contract (tests 15-19): aeson >= 2.2's
+-- eitherDecodeStrict' must consume the whole input as exactly one
+-- JSON document (trailing whitespace only). Pinned here so an aeson
+-- upgrade cannot silently relax the CLI's parse discipline.
+assertDecodeRejected :: String -> Assertion
+assertDecodeRejected raw =
+  case A.eitherDecodeStrict' (BSC.pack raw) :: Either String A.Value of
+    Left _ -> return ()
+    Right v ->
+      assertFailure
+        ("expected strict-decode rejection for " ++ show raw ++ ", got: " ++ show v)
+
+assertDecodeAccepted :: String -> Assertion
+assertDecodeAccepted raw =
+  case A.eitherDecodeStrict' (BSC.pack raw) :: Either String A.Value of
+    Left err -> assertFailure ("expected acceptance for " ++ show raw ++ ", got: " ++ err)
+    Right _ -> return ()
+
+-- Number rendering contract (tests 26-29): canonical output must be
+-- ECMAScript-ToString plain decimal over DOUBLE semantics, matching
+-- the C/Go/OCaml reference lineages byte-for-byte. Sub-0.01 fractions
+-- are where the old %g formatter drifted into exponent notation.
+assertCanonicalizes :: String -> String -> Assertion
+assertCanonicalizes raw expected =
+  case A.eitherDecodeStrict' (BSC.pack raw) :: Either String A.Value of
+    Left err -> assertFailure ("fixture must parse: " ++ err)
+    Right v -> canonicalizeJson v @?= expected
+
+-- Number-domain contract (tests 20-25): lexical check over raw bytes,
+-- error text must carry both "unsupported" and "number" so pipeline
+-- greps can classify the failure.
+assertNumberRejected :: String -> Assertion
+assertNumberRejected raw =
+  case checkNumberDomain (BSC.pack raw) of
+    Left err ->
+      assertBool
+        ("error message must mention unsupported number, got: " ++ err)
+        ( T.isInfixOf "unsupported" (T.pack err)
+            && T.isInfixOf "number" (T.pack err)
+        )
+    Right () ->
+      assertFailure ("expected number-domain rejection for: " ++ raw)
+
+assertNumberAccepted :: String -> Assertion
+assertNumberAccepted raw =
+  case checkNumberDomain (BSC.pack raw) of
+    Left err -> assertFailure ("expected acceptance for " ++ raw ++ ", got: " ++ err)
+    Right () -> return ()
 
 testSha256Vector :: Assertion
 testSha256Vector = do
