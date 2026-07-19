@@ -551,3 +551,20 @@ unittest
     assert(scanStrictTokens(`{"s":"0635 nuLl 2-"}`).isNull,
             "strict-token FAILED: in-string text wrongly flagged");
 }
+
+// ── Test: RFC 8785 §3.2.3 UTF-16 key ordering — astral before BMP ──
+// Golden vector: object with key U+E000 (BMP) => 1 and key U+10000 (astral)
+// => 2. Byte/codepoint order would sort U+E000 (0xEE...) before U+10000
+// (0xF0...), but UTF-16 order sorts the astral key first because its high
+// surrogate 0xD800 is below the BMP code unit 0xE000. Canonical output must
+// place the astral key first.
+unittest
+{
+    JSONValue v = parseJSON("{\"\":1,\"\U00010000\":2}");
+    string canonical = canonicalizeJSON(v);
+    // Expected raw UTF-8: {"<U+10000>":2,"<U+E000>":1}
+    string expected = "{\"\U00010000\":2,\"\":1}";
+    assert(canonical == expected,
+            "UTF-16 key order FAILED.\n  Expected: " ~ expected
+            ~ "\n  Got:      " ~ canonical);
+}

@@ -25,6 +25,22 @@ static void test_nested_key_sorting(void)
     cJSON_Delete(obj);
 }
 
+/* RFC 8785 §3.2.3 golden vector: keys must sort by UTF-16 code units, not
+ * UTF-8 bytes. Key U+10000 (astral, high surrogate 0xD800) sorts BEFORE key
+ * U+E000 (BMP), the reverse of native byte order. */
+static void test_utf16_astral_key_order(void)
+{
+    cJSON* obj = cJSON_CreateObject();
+    cJSON_AddNumberToObject(obj, "\xee\x80\x80", 1); /* U+E000 -> value 1 */
+    cJSON_AddNumberToObject(obj, "\xf0\x90\x80\x80", 2); /* U+10000 -> value 2 */
+
+    char* json = baion_canonicalize_json(obj);
+    /* Astral key first: {"<U+10000>":2,"<U+E000>":1} */
+    ASSERT_STR_EQ(json, "{\"\xf0\x90\x80\x80\":2,\"\xee\x80\x80\":1}");
+    free(json);
+    cJSON_Delete(obj);
+}
+
 static void test_string_escaping(void)
 {
     cJSON* s;
@@ -439,6 +455,7 @@ int main(void)
 {
     printf("test_canonical_json:\n");
     RUN_TEST(test_nested_key_sorting);
+    RUN_TEST(test_utf16_astral_key_order);
     RUN_TEST(test_string_escaping);
     RUN_TEST(test_number_formats);
     RUN_TEST(test_array_order_preserved);

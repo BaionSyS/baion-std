@@ -24,6 +24,25 @@ func TestCanonicalJSON_NestedSorting(t *testing.T) {
 	}
 }
 
+func TestCanonicalJSON_UTF16KeyOrder(t *testing.T) {
+	// RFC 8785 §3.2.3: member names sort by UTF-16 code units, not UTF-8 bytes.
+	// Key U+10000 (astral) must sort BEFORE key U+E000 (BMP) because its high
+	// surrogate 0xD800 < 0xE000, even though its UTF-8 bytes (0xF0...) are greater.
+	doc := map[string]interface{}{
+		"":       json.Number("1"),
+		"\U00010000":   json.Number("2"),
+	}
+	got := CanonicalizeJSON(doc)
+	want := "{\"\U00010000\":2,\"\":1}"
+	if got != want {
+		t.Fatalf("UTF-16 key order FAILED\nwant bytes: % x\ngot bytes:  % x", want, got)
+	}
+	wantHex := []byte{0x7b, 0x22, 0xf0, 0x90, 0x80, 0x80, 0x22, 0x3a, 0x32, 0x2c, 0x22, 0xee, 0x80, 0x80, 0x22, 0x3a, 0x31, 0x7d}
+	if string(wantHex) != got {
+		t.Fatalf("golden hex mismatch\nwant: % x\ngot:  % x", wantHex, got)
+	}
+}
+
 func TestCanonicalJSON_StringEscaping(t *testing.T) {
 	tests := []struct {
 		name  string

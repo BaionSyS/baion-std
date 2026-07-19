@@ -17,6 +17,7 @@ import (
 	"sort"
 	"strconv"
 	"strings"
+	"unicode/utf16"
 	"unicode/utf8"
 )
 
@@ -392,7 +393,12 @@ func canonicalizeValue(b *strings.Builder, v interface{}) {
 		for k := range val {
 			keys = append(keys, k)
 		}
-		sort.Strings(keys)
+		// UTF-16 order per RFC 8785 §3.2.3, not sort.Strings byte order:
+		// members are sorted by their UTF-16 code-unit sequences compared as
+		// unsigned 16-bit integers, which differs from UTF-8 byte order only
+		// for astral scalars (>= U+10000, whose high surrogate 0xD800-0xDBFF
+		// sorts before BMP code units 0xE000-0xFFFF).
+		sort.Slice(keys, func(i, j int) bool { return utf16Less(keys[i], keys[j]) })
 		b.WriteByte('{')
 		for i, k := range keys {
 			if i > 0 {
@@ -417,6 +423,24 @@ func canonicalizeValue(b *strings.Builder, v interface{}) {
 		data, _ := json.Marshal(val)
 		b.Write(data)
 	}
+}
+
+// utf16Less reports whether key a sorts before key b under RFC 8785 §3.2.3
+// object member ordering: compare the UTF-16 code-unit sequences of the two
+// UTF-8 keys lexicographically as unsigned 16-bit integers, shorter-prefix-first.
+func utf16Less(a, b string) bool {
+	ua := utf16.Encode([]rune(a))
+	ub := utf16.Encode([]rune(b))
+	n := len(ua)
+	if len(ub) < n {
+		n = len(ub)
+	}
+	for i := 0; i < n; i++ {
+		if ua[i] != ub[i] {
+			return ua[i] < ub[i]
+		}
+	}
+	return len(ua) < len(ub)
 }
 
 // writeJSONString writes a JSON-quoted string with minimal escaping.

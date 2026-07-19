@@ -148,12 +148,85 @@ static void write_json_string(strbuf_t* sb, const char* s)
 /* Forward declaration */
 static void canonicalize_value(strbuf_t* sb, const cJSON* item);
 
-/* Compare function for qsort on cJSON key names */
+/* Decode one scalar from pre-validated UTF-8 at *p; advance *p past it.
+ * Keys reach here already UTF-8-validated, so no malformed-input path. */
+static uint32_t utf8_next_scalar(const unsigned char** p)
+{
+    const unsigned char* s = *p;
+    uint32_t c = s[0];
+    uint32_t scalar;
+    int n, i;
+    if (c < 0x80) { scalar = c; n = 1; }
+    else if ((c & 0xE0) == 0xC0) { scalar = c & 0x1Fu; n = 2; }
+    else if ((c & 0xF0) == 0xE0) { scalar = c & 0x0Fu; n = 3; }
+    else { scalar = c & 0x07u; n = 4; }
+    for (i = 1; i < n; i++)
+        scalar = (scalar << 6) | (s[i] & 0x3Fu);
+    *p += n;
+    return scalar;
+}
+
+/* UTF-16 code-unit cursor over a UTF-8 key: holds a pending low surrogate
+ * so astral scalars are emitted as a high/low code-unit pair. */
+typedef struct
+{
+    const unsigned char* p;
+    int has_low;
+    uint16_t low;
+} cu_iter_t;
+
+/* Emit next UTF-16 code unit into *out; returns 1 if one was produced,
+ * 0 at end of key. Surrogate mapping per Unicode/RFC 8785 §3.2.3. */
+static int cu_next(cu_iter_t* it, uint16_t* out)
+{
+    if (it->has_low)
+    {
+        *out = it->low;
+        it->has_low = 0;
+        return 1;
+    }
+    if (*it->p == 0)
+        return 0;
+    uint32_t s = utf8_next_scalar(&it->p);
+    if (s < 0x10000u)
+    {
+        *out = (uint16_t)s;
+        return 1;
+    }
+    uint32_t v = s - 0x10000u;
+    *out = (uint16_t)(0xD800u + (v >> 10));
+    it->has_low = 1;
+    it->low = (uint16_t)(0xDC00u + (v & 0x3FFu));
+    return 1;
+}
+
+/* Compare function for qsort on cJSON key names.
+ * WHY: RFC 8785 §3.2.3 requires object member names be sorted by their
+ * UTF-16 code-unit sequence compared as unsigned 16-bit integers — NOT
+ * native UTF-8 byte order (strcmp). The only behavioral difference from
+ * strcmp is that astral scalars (>= U+10000) compare via their high
+ * surrogate (0xD800..0xDBFF), which sorts BELOW BMP scalars U+E000..U+FFFF,
+ * so astral-plane keys sort first at a differing position. */
 static int key_compare(const void* a, const void* b)
 {
     const cJSON* ia = *(const cJSON**)a;
     const cJSON* ib = *(const cJSON**)b;
-    return strcmp(ia->string, ib->string);
+    cu_iter_t ita = { (const unsigned char*)ia->string, 0, 0 };
+    cu_iter_t itb = { (const unsigned char*)ib->string, 0, 0 };
+    for (;;)
+    {
+        uint16_t ca, cb;
+        int ha = cu_next(&ita, &ca);
+        int hb = cu_next(&itb, &cb);
+        if (!ha && !hb)
+            return 0;
+        if (!ha)
+            return -1; /* shorter common-prefix sequence sorts first */
+        if (!hb)
+            return 1;
+        if (ca != cb)
+            return ca < cb ? -1 : 1;
+    }
 }
 
 static void canonicalize_object(strbuf_t* sb, const cJSON* obj)

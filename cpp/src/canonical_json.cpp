@@ -445,6 +445,73 @@ bool canonicalize_json_checked(const nlohmann::json& j, std::string& out)
     return true;
 }
 
+// ── Internal: RFC 8785 §3.2.3 object-key ordering ─────────────
+// Keys are sorted by their UTF-16 code-unit sequences compared as
+// unsigned 16-bit ints — NOT by native UTF-8 byte order. The only
+// observable difference from byte order is that astral scalars
+// (>= U+10000) encode to a high surrogate 0xD800–0xDBFF, which is
+// less than BMP scalars U+E000–U+FFFF, so astral keys sort first.
+// Keys are already validated UTF-8 at this point.
+static void utf8_to_utf16(const std::string& s, std::vector<uint16_t>& units)
+{
+    size_t i = 0;
+    const size_t n = s.size();
+    while (i < n)
+    {
+        unsigned char b0 = static_cast<unsigned char>(s[i]);
+        uint32_t scalar;
+        size_t len;
+        if (b0 < 0x80)
+        {
+            scalar = b0;
+            len = 1;
+        }
+        else if ((b0 & 0xE0) == 0xC0)
+        {
+            scalar = b0 & 0x1F;
+            len = 2;
+        }
+        else if ((b0 & 0xF0) == 0xE0)
+        {
+            scalar = b0 & 0x0F;
+            len = 3;
+        }
+        else
+        {
+            scalar = b0 & 0x07;
+            len = 4;
+        }
+        for (size_t k = 1; k < len; ++k)
+        {
+            scalar = (scalar << 6) |
+                     (static_cast<unsigned char>(s[i + k]) & 0x3F);
+        }
+        i += len;
+
+        if (scalar < 0x10000)
+        {
+            units.push_back(static_cast<uint16_t>(scalar));
+        }
+        else
+        {
+            // Surrogate pair per RFC 8785 §3.2.3.
+            uint32_t v = scalar - 0x10000;
+            units.push_back(static_cast<uint16_t>(0xD800 + (v >> 10)));
+            units.push_back(static_cast<uint16_t>(0xDC00 + (v & 0x3FF)));
+        }
+    }
+}
+
+// UTF-16 order per RFC 8785 §3.2.3, not byte order.
+static bool utf16_less(const std::string& a, const std::string& b)
+{
+    std::vector<uint16_t> ua, ub;
+    utf8_to_utf16(a, ua);
+    utf8_to_utf16(b, ub);
+    return std::lexicographical_compare(ua.begin(), ua.end(),
+                                        ub.begin(), ub.end());
+}
+
 // ── Recursive canonical serialization ─────────────────────────
 std::string canonicalize_json(const nlohmann::json& j)
 {
@@ -494,7 +561,8 @@ std::string canonicalize_json(const nlohmann::json& j)
         {
             keys.push_back(it.key());
         }
-        std::sort(keys.begin(), keys.end());
+        // UTF-16 order per RFC 8785 §3.2.3, not byte order.
+        std::sort(keys.begin(), keys.end(), utf16_less);
 
         out.push_back('{');
         bool first = true;

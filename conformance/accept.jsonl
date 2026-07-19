@@ -2,6 +2,7 @@
 {"name": "key_sort_unicode", "input": "{\"z\":1,\"a\":\"\u00e9\"}", "sha256": "fb64e573f7cde5b7efeda52ffc4bdd57572055b0b7e64a70172606c82c6c7eac"}
 {"name": "nested_mixed", "input": "{\"nested\":{\"y\":[true,false,null],\"x\":0.5},\"empty\":{},\"arr\":[]}", "sha256": "0a9f877d8a670ed579d21f5b7e32d870cde347fc0e6450d9f284724217f025da"}
 {"name": "unicode_keys", "input": "{\"\u00e9\":1,\"e\":2,\"z\u00df\":\"stra\u00dfe\"}", "sha256": "f9eaba80c1a925d133b1adfe9ae4e2ffc486048dc216131f40a1152ef0ddc665"}
+{"name": "utf16_key_order_astral_before_bmp", "input": "{\"\ue000\":1,\"\ud800\udc00\":2}", "sha256": "9d4cdc71dda603c42f9b21d88d0c2ffc31a76cd1bd461d7359406cf169845f1e"}
 {"name": "escape_zoo", "input": "{\"escapes\":\"line\\nbreak\\ttab \\\"quoted\\\" back\\\\slash\"}", "sha256": "fb152eccf9225e2728e71bdcdaa0781912053ee5bce83d7195908f929a1f7cef"}
 {"name": "max_safe_int", "input": "{\"max_safe\":9007199254740992,\"neg\":-42,\"empty\":\"\"}", "sha256": "b8913d02715acee3830bff9f7aa690cc57b9abce0d003292e87e8b0b57f142ca"}
 {"name": "deep_structure", "input": "{\"deep\":{\"a\":{\"b\":{\"c\":[1,{\"d\":[]}]}}}}", "sha256": "3fc8cc84e97caacd0c18f216100e13f3ae35c4f5569b0a193b706e9b217c4362"}
