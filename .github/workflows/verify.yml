@@ -196,3 +196,11 @@ jobs:
       # accept/reject split or hash split across the seven CLIs fails.
       - name: Run differential probe
         run: python3 conformance/differential_probe.py
+
+      # Crash-aware fuzzer: seeded (reproducible) structured/mutation/garbage
+      # inputs. Fails on any seven-way accept/reject or hash split AND on any
+      # lineage that dies on a signal (a crash is not a clean rejection). The
+      # seed is pinned so a CI failure reproduces exactly:
+      # `python3 conformance/fuzz_agreement.py 20260715`.
+      - name: Run crash-aware fuzzer
+        run: python3 conformance/fuzz_agreement.py 20260715
