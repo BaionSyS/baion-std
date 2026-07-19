@@ -10,12 +10,13 @@
 module baionstd.canonical_json;
 
 import std.json;
-import std.algorithm : sort;
+import std.algorithm : sort, cmp;
 import std.array : Appender, appender;
 import std.conv : to;
 import std.format : format;
 import std.math : isNaN, isInfinity;
 import std.typecons : Nullable;
+import std.utf : toUTF16;
 
 import baionstd.types : StdError, errorMessage;
 
@@ -191,7 +192,11 @@ void canonicalizeValue(ref Appender!string buf, const JSONValue v)
         keys.reserve(obj.length);
         foreach (k; obj.byKey())
             keys ~= k;
-        keys.sort();
+        // UTF-16 order per RFC 8785 §3.2.3, not default byte-order sort:
+        // member names compare by their UTF-16 code-unit sequences as
+        // unsigned 16-bit integers (astral scalars sort via high surrogate
+        // 0xD800–0xDBFF, ahead of BMP U+E000–U+FFFF).
+        keys.sort!((a, b) => cmp(a.toUTF16, b.toUTF16) < 0);
 
         buf.put('{');
         bool firstObj = true;

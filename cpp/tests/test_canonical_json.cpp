@@ -28,6 +28,28 @@ TEST(CanonicalJSON, DeepNestedKeySorting)
     EXPECT_EQ(result, expected);
 }
 
+// ── RFC 8785 §3.2.3: keys sorted by UTF-16 code units ─────────
+// Astral scalars (>= U+10000) encode to a high surrogate
+// 0xD800–0xDBFF, which sorts BEFORE a BMP key at U+E000–U+FFFF,
+// even though the UTF-8 bytes (0xF0.. vs 0xEE..) would sort the
+// other way. Golden vector: {"<U+E000>":1,"<U+10000>":2} must
+// canonicalize with the astral key first.
+TEST(CanonicalJSON, Rfc8785Utf16KeyOrderAstralFirst)
+{
+    nlohmann::json j;
+    j[std::string("\xEE\x80\x80")] = 1;         // U+E000  (BMP)
+    j[std::string("\xF0\x90\x80\x80")] = 2;      // U+10000 (astral)
+
+    std::string result = canonicalize_json(j);
+
+    const std::string expected =
+        "{"
+        "\"\xF0\x90\x80\x80\":2,"   // astral key first
+        "\"\xEE\x80\x80\":1"
+        "}";
+    EXPECT_EQ(result, expected);
+}
+
 // ── String escaping: minimal escaping only ────────────────────
 TEST(CanonicalJSON, MinimalStringEscaping)
 {

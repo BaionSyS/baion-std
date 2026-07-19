@@ -491,6 +491,35 @@ let format_shortest_float f =
     in
     if f < 0. then "-" ^ body else body
 
+(* UTF-16 code-unit sequence of a (validated-UTF-8) object key. RFC 8785
+   §3.2.3 orders member names by their UTF-16 encoding, comparing code
+   units as unsigned 16-bit ints — NOT String.compare byte order. The two
+   agree everywhere except astral scalars (>= U+10000): those encode to a
+   high surrogate 0xD800..0xDBFF, which sorts BEFORE BMP scalars in
+   U+E000..U+FFFF under UTF-16 but AFTER them in UTF-8 byte order.
+   Decode each scalar and emit one code unit (BMP) or a surrogate pair
+   (astral); comparing the resulting int lists lexicographically gives the
+   RFC ordering. *)
+let utf16_key s =
+  let n = String.length s in
+  let rec loop i acc =
+    if i >= n then List.rev acc
+    else
+      let dec = String.get_utf_8_uchar s i in
+      let cp = Uchar.to_int (Uchar.utf_decode_uchar dec) in
+      let len = Uchar.utf_decode_length dec in
+      let acc =
+        if cp < 0x10000 then cp :: acc
+        else
+          let cp' = cp - 0x10000 in
+          let hi = 0xD800 lor (cp' lsr 10) in
+          let lo = 0xDC00 lor (cp' land 0x3FF) in
+          lo :: hi :: acc
+      in
+      loop (i + len) acc
+  in
+  loop 0 []
+
 (** Recursively write a JSON value in canonical form. *)
 let rec canonicalize_value buf (v : Yojson.Safe.t) =
   match v with
@@ -518,9 +547,14 @@ let rec canonicalize_value buf (v : Yojson.Safe.t) =
         items;
       Buffer.add_char buf ']'
   | `Assoc pairs ->
-      (* CRITICAL: sort keys lexicographically *)
+      (* CRITICAL: sort keys in UTF-16 code-unit order per RFC 8785
+         §3.2.3, not String.compare byte order (differs only for astral
+         keys — see utf16_key). Comparing int lists is lexicographic,
+         shorter-prefix-first, over unsigned 16-bit code units. *)
       let sorted =
-        List.sort (fun (k1, _) (k2, _) -> String.compare k1 k2) pairs
+        List.sort
+          (fun (k1, _) (k2, _) -> compare (utf16_key k1) (utf16_key k2))
+          pairs
       in
       Buffer.add_char buf '{';
       List.iteri

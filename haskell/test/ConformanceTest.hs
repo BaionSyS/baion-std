@@ -235,8 +235,26 @@ conformanceTests =
         -- Small integer-valued floats must be untouched by the
         -- shortening pass (corpus-pinned spellings).
         assertCanonicalizes "{\"x\":1.0}" "{\"x\":1}"
-        assertCanonicalizes "{\"x\":-0.0}" "{\"x\":0}"
+        assertCanonicalizes "{\"x\":-0.0}" "{\"x\":0}",
+      -- Test 38: RFC 8785 §3.2.3 UTF-16 key order at the BMP/astral
+      -- boundary. Input {"<U+E000>":1,"<U+10000>":2}. Codepoint order
+      -- would keep U+E000 first; UTF-16 order puts the astral key first
+      -- (its high surrogate 0xD800 < BMP 0xE000). Golden UTF-8 bytes
+      -- cross-checked against the other lineages.
+      testCase "Test 38: astral key sorts before BMP key (RFC 8785 UTF-16 order)" $
+        assertCanonicalBytes
+          (BS.pack [0x7b, 0x22, 0xee, 0x80, 0x80, 0x22, 0x3a, 0x31, 0x2c, 0x22, 0xf0, 0x90, 0x80, 0x80, 0x22, 0x3a, 0x32, 0x7d])
+          [0x7b, 0x22, 0xf0, 0x90, 0x80, 0x80, 0x22, 0x3a, 0x32, 0x2c, 0x22, 0xee, 0x80, 0x80, 0x22, 0x3a, 0x31, 0x7d]
     ]
+
+-- Canonicalize raw input bytes and assert the UTF-8 bytes of the
+-- canonical output match exactly (byte-level golden vector).
+assertCanonicalBytes :: BS.ByteString -> [Word8] -> Assertion
+assertCanonicalBytes raw expected =
+  case A.eitherDecodeStrict' raw :: Either String A.Value of
+    Left err -> assertFailure ("fixture must parse: " ++ err)
+    Right v ->
+      BS.unpack (TE.encodeUtf8 (T.pack (canonicalizeJson v))) @?= expected
 
 -- Full-pipeline hash pin: decode, canonicalize, SHA-256 the UTF-8
 -- bytes — must equal the six-lineage digest for the same input.

@@ -81,18 +81,28 @@ for L in "${LINEAGES[@]}"; do
   if [ "$h" = "$ref" ]; then printf '  MATCH %-8s %s\n' "$L" "$h"; else printf '  DIFF  %-8s %s\n' "$L" "$h"; fail=1; fi
 done
 
-# Reject pass: every lineage must refuse these with nonzero exit. Reasons are
-# documented per-row in reject.jsonl.
+# Reject pass: every lineage must DELIBERATELY refuse these. A clean rejection is
+# a controlled nonzero exit (1..125). A crash is NOT a rejection: a segfault
+# (SIGSEGV → 139), abort (SIGABRT → 134), any signal death (≥128), or an
+# exec/permission failure (126/127) means the canonicalizer died on malformed
+# input instead of refusing it — a memory-safety/robustness defect that must
+# fail the gate, not pass as "REJECT ok". (Prior behavior scored any nonzero
+# exit as a pass, so a crashing lineage looked correct.)
 n_reject=0
 while IFS=$'\t' read -r name b64 _; do
   n_reject=$((n_reject + 1))
   echo "reject: $name"
   for L in "${LINEAGES[@]}"; do
-    if printf '%s' "$b64" | base64 -d | "$HERE/$L/bin/baion_canon_hash" >/dev/null 2>&1; then
+    printf '%s' "$b64" | base64 -d | "$HERE/$L/bin/baion_canon_hash" >/dev/null 2>&1
+    rc=$?
+    if [ "$rc" -eq 0 ]; then
       printf '  BAD   %-8s accepted input it must reject\n' "$L"
       fail=1
+    elif [ "$rc" -ge 126 ]; then
+      printf '  CRASH %-8s exited %d (signal/exec failure, not a clean reject)\n' "$L" "$rc"
+      fail=1
     else
-      printf '  REJECT %-7s ok\n' "$L"
+      printf '  REJECT %-7s ok (exit %d)\n' "$L" "$rc"
     fi
   done
 done < <(corpus_rows "$REJECT")

@@ -14,7 +14,6 @@
 // bytes is used as a content key, so any divergence breaks key parity.
 
 use serde_json::Value;
-use std::collections::BTreeMap;
 
 /// Rejection error: the input contained U+0000 (NUL) in an object key or
 /// string value at some depth. Canonicalization refuses such input.
@@ -103,13 +102,18 @@ pub fn canonicalize_value(v: &Value, out: &mut String) {
             out.push(']');
         }
         Value::Object(map) => {
-            // Keys sorted lexicographically at every nesting level.
+            // Keys sorted at every nesting level.
             // serde_json::Map preserves insertion order but is NOT sorted.
             // We must sort explicitly.
-            let mut sorted: BTreeMap<&str, &Value> = BTreeMap::new();
-            for (k, v) in map.iter() {
-                sorted.insert(k.as_str(), v);
-            }
+            //
+            // UTF-16 order per RFC 8785 §3.2.3; BTreeMap<&str> sorts by UTF-8
+            // bytes which diverges at the astral/BMP boundary. encode_utf16()
+            // yields the code-unit sequence (surrogate pairs for scalars ≥
+            // U+10000), and Vec<u16>/iterator Ord compares those as unsigned
+            // 16-bit code units — exactly the RFC 8785 member-name ordering.
+            let mut sorted: Vec<(&str, &Value)> =
+                map.iter().map(|(k, v)| (k.as_str(), v)).collect();
+            sorted.sort_by(|a, b| a.0.encode_utf16().cmp(b.0.encode_utf16()));
 
             out.push('{');
             let mut first = true;
@@ -287,6 +291,26 @@ mod tests {
         // canonicalize normally.
         let j: Value = serde_json::from_str(r#"{"x":"a\\u0000b"}"#).unwrap();
         assert_eq!(canonicalize_json(&j).unwrap(), r#"{"x":"a\\u0000b"}"#);
+    }
+
+    #[test]
+    fn utf16_key_order_astral_before_bmp() {
+        // RFC 8785 §3.2.3: object member names sort by UTF-16 code units.
+        // Key U+10000 (𐀀) encodes to surrogate pair 0xD800 0xDC00; key U+E000
+        // is BMP 0xE000. Since 0xD800 < 0xE000, the astral key sorts FIRST —
+        // the opposite of UTF-8 byte order (F0 90 80 80 > EE 80 80).
+        let j: Value =
+            serde_json::from_str("{\"\u{E000}\":1,\"\u{10000}\":2}").unwrap();
+        let result = canonicalize_json(&j).unwrap();
+        assert_eq!(result, "{\"\u{10000}\":2,\"\u{E000}\":1}");
+        // Exact canonical bytes: astral key first.
+        assert_eq!(
+            result.as_bytes(),
+            &[
+                0x7b, 0x22, 0xf0, 0x90, 0x80, 0x80, 0x22, 0x3a, 0x32, 0x2c,
+                0x22, 0xee, 0x80, 0x80, 0x22, 0x3a, 0x31, 0x7d
+            ]
+        );
     }
 
     #[test]

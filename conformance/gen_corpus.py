@@ -31,6 +31,12 @@ ACCEPT = [
     ("key_sort_unicode", '{"z":1,"a":"é"}'),
     ("nested_mixed", '{"nested":{"y":[true,false,null],"x":0.5},"empty":{},"arr":[]}'),
     ("unicode_keys", '{"é":1,"e":2,"zß":"straße"}'),
+    # UTF-16 key ordering at the astral/BMP boundary (RFC 8785 §3.2.3): the
+    # astral key U+10000 must sort BEFORE the BMP key U+E000, because U+10000's
+    # UTF-16 high surrogate (0xD800) is less than 0xE000. Codepoint/byte order
+    # would place the astral key AFTER — so this vector discriminates a UTF-16
+    # comparator from a raw-codepoint one and locks all seven to UTF-16 order.
+    ("utf16_key_order_astral_before_bmp", '{"":1,"\U00010000":2}'),
     ("escape_zoo", '{"escapes":"line' + BS + 'nbreak' + BS + 'ttab ' + BS + '"quoted' + BS + '" back' + BS + BS + 'slash"}'),
     ("max_safe_int", '{"max_safe":9007199254740992,"neg":-42,"empty":""}'),
     ("deep_structure", '{"deep":{"a":{"b":{"c":[1,{"d":[]}]}}}}'),

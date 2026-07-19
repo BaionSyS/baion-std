@@ -23,10 +23,12 @@ import Data.Aeson.Decoding.Tokens
   )
 import qualified Data.Aeson.Key as AK
 import qualified Data.Aeson.KeyMap as AKM
+import Data.Bits (shiftR, (.&.))
 import qualified Data.ByteString as BS
 import Data.Char (ord)
-import Data.List (foldl')
+import Data.List (foldl', sortOn)
 import qualified Data.Map.Strict as Map
+import Data.Word (Word16)
 import qualified Data.Scientific as S
 import qualified Data.Set as Set
 import qualified Data.Text as T
@@ -264,17 +266,37 @@ canonicalizeValue (A.String t) = writeJsonString (T.unpack t)
 canonicalizeValue (A.Array arr) =
   "[" ++ commaJoin (map canonicalizeValue (V.toList arr)) ++ "]"
 canonicalizeValue (A.Object obj) =
-  let sorted =
-        Map.toAscList
-          ( Map.fromList
-              [(AK.toText k, v) | (k, v) <- AKM.toList obj]
-          )
+  -- Sort member names by UTF-16 order per RFC 8785 §3.2.3, not by
+  -- Text's native codepoint Ord: the two diverge at the BMP/astral
+  -- boundary (astral high surrogate 0xD800-0xDBFF sorts before BMP
+  -- U+E000-U+FFFF), so 'Map.toAscList' would place astral keys wrong.
+  let sorted = sortOn (utf16Key . fst) [(AK.toText k, v) | (k, v) <- AKM.toList obj]
    in "{"
         ++ commaJoin
           [ writeJsonString (T.unpack k) ++ ":" ++ canonicalizeValue v
           | (k, v) <- sorted
           ]
         ++ "}"
+
+-- | Map a member name to its UTF-16 code-unit sequence for RFC 8785
+-- §3.2.3 key ordering. Comparing the resulting '[Word16]' lists with
+-- the standard lexicographic 'compare' reproduces "compare code units
+-- as unsigned 16-bit integers": a BMP char (< U+10000) is one unit; an
+-- astral char (>= U+10000) is the surrogate pair (high 0xD800.., low
+-- 0xDC00..), so astral keys sort before BMP keys differing at
+-- U+E000-U+FFFF. Codepoint order (Text's Ord) would sort them after.
+utf16Key :: T.Text -> [Word16]
+utf16Key = concatMap toUnits . T.unpack
+  where
+    toUnits c =
+      let n = ord c
+       in if n < 0x10000
+            then [fromIntegral n]
+            else
+              let n' = n - 0x10000
+               in [ fromIntegral (0xD800 + (n' `shiftR` 10)),
+                    fromIntegral (0xDC00 + (n' .&. 0x3FF))
+                  ]
 
 -- | Show a Double in canonical-JSON form per ECMA-262 §7.1.12.1
 -- (Number::toString radix 10), plain decimal only — the reference

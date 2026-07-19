@@ -164,6 +164,18 @@ let test_no_duplicates_mixed_allowed () =
     {|{"a":[1,2],"b":1}|}
     (Canonical_json.canonicalize_json v)
 
+(* RFC 8785 §3.2.3 member-name ordering is by UTF-16 code units, not
+   UTF-8 bytes. Key U+10000 (astral) encodes to high surrogate 0xD800,
+   which sorts BEFORE key U+E000 (BMP) under UTF-16, though it sorts AFTER
+   it in UTF-8 byte order (0xF0.. > 0xEE..). The astral key must come
+   first. Bytes: "\xf0\x90\x80\x80" = U+10000, "\xee\x80\x80" = U+E000. *)
+let test_utf16_astral_key_order () =
+  let v = Yojson.Safe.from_string "{\"\xee\x80\x80\":1,\"\xf0\x90\x80\x80\":2}" in
+  Alcotest.(check string)
+    "astral key sorts before BMP key (UTF-16 order)"
+    "{\"\xf0\x90\x80\x80\":2,\"\xee\x80\x80\":1}"
+    (Canonical_json.canonicalize_json v)
+
 (* Number-domain enforcement is a LEXICAL pass over the raw text —
    yojson parses 1e2 and 100 to the same value, so the exponent
    spelling is only distinguishable before parsing. *)
@@ -413,6 +425,8 @@ let () =
             (check_document "reference_document_unicode");
           Alcotest.test_case "edge-case document" `Quick
             (check_document "reference_document_edges");
+          Alcotest.test_case "UTF-16 astral key ordering (RFC 8785 §3.2.3)"
+            `Quick test_utf16_astral_key_order;
         ] );
       ( "integer_valued_floats",
         [
