@@ -44,11 +44,22 @@ jobs:
         with:
           toolchain: '1.94.0'
 
+      # Direct pinned-bytes install, replacing dlang-community/setup-dlang
+      # (issue #3): upstream's latest revision still declares the deprecated
+      # node20 runtime (their issue #100, open), so the wait-for-upstream
+      # condition cannot be met. The tarball SHA-256 pins the exact toolchain
+      # bytes -- stronger than the action's version-string pin -- and the
+      # dmd binary inside is byte-identical to the locally verified v0.2.1
+      # build environment (dmd 2.112.0, dub 1.41.0). No JS runtime involved.
       - name: Set up D
         if: matrix.lineage == 'd'
-        uses: dlang-community/setup-dlang@d7d85fcde7c4cd5f9a6618fce1bccc316e1e910b # v2
-        with:
-          compiler: dmd-2.112.0
+        run: |
+          curl -fsSL -o "$RUNNER_TEMP/dmd.tar.xz" \
+            https://downloads.dlang.org/releases/2.x/2.112.0/dmd.2.112.0.linux.tar.xz
+          echo "4556ecde412c6c43662cd1c6e7cec5c6d567b7e74508287a8a0c3c6c506a7e94  $RUNNER_TEMP/dmd.tar.xz" | sha256sum -c -
+          tar -C "$RUNNER_TEMP" -xf "$RUNNER_TEMP/dmd.tar.xz"
+          echo "$RUNNER_TEMP/dmd2/linux/bin64" >> "$GITHUB_PATH"
+          echo "DC=dmd" >> "$GITHUB_ENV"
 
       - name: Set up Haskell
         if: matrix.lineage == 'haskell'
