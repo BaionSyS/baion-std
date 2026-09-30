@@ -1,5 +1,36 @@
 # Changelog
 
+## v0.2.2 — 2026-09-30
+
+Corrective release. v0.2.1 remains published and tagged — this release
+supersedes it rather than replacing it.
+
+### Fixed
+
+- **Object member names are now sorted by UTF-16 code units, as RFC 8785
+  §3.2.3 requires** (all seven lineages). The fix was made 2026-07-19 and is
+  released now. v0.2.1 sorted member names by byte / code-point order, which
+  disagrees with UTF-16 order only for objects that mix member names above
+  U+FFFF (written as a surrogate pair, high unit 0xD800..0xDBFF) with member
+  names in U+E000..U+FFFF. For all other objects the two orders agree, so
+  hashes differ from v0.2.1 **only** for objects mixing such names. Example:
+  `{"":1,"𐀀":2}` now puts the astral name first.
+
+### Added
+
+- Conformance vector `utf16_key_order_astral_before_bmp` pinned in the
+  corpus (accept list), so every lineage is locked to UTF-16 order at the
+  astral / private-use boundary.
+- Crash-aware fuzzer in CI: the principal verify workflow now runs the
+  seven-way agreement fuzzer, and `verify_all_lineages.sh` no longer scores a
+  crash (signal exit, 126, 127) as a clean rejection; only a controlled
+  nonzero exit (1..125) counts as a refusal.
+
+### Documentation
+
+- Offline-build documentation: the C and C++ network fetch is stated
+  honestly, and the offline flags are documented.
+
 ## v0.2.1 — 2026-07-15
 
 Corrective release. v0.2.0 remains published and tagged — this release
